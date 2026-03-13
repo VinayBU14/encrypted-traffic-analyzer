@@ -1,0 +1,24 @@
+# V1 configuration defaults
+# All runtime configuration for the encrypted-traffic-analyzer pipeline.
+# Populate this file with actual values before running the pipeline.
+
+pipeline:
+  flow_timeout_seconds: 120
+  pcap_path: "data/raw/"
+  processed_path: "data/processed/"
+  features_path: "data/features/"
+  models_path: "models/"
+
+feature_engineering:
+  schema_version: "v1"
+
+ml_model:
+  algorithm: "random_forest"
+  threshold: 0.5
+
+api:
+  host: "0.0.0.0"
+  port: 8000
+
+dashboard:
+  port: 8501

@@ -1,3 +1,14 @@
+# Project-specific ignores
+# Raw traffic data, large datasets, and serialized model artifacts
+data/raw/*
+data/processed/*
+data/features/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/features/.gitkeep
+models/*
+!models/.gitkeep
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
