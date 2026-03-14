@@ -1,1 +1,17 @@
 
+pyshark==0.6
+scapy==2.6.1
+cryptography==44.0.1
+pyyaml==6.0.2
+fastapi==0.115.8
+uvicorn[standard]==0.34.0
+streamlit==1.42.2
+networkx==3.4.2
+scikit-learn==1.6.1
+joblib==1.4.2
+pandas==2.2.3
+numpy==2.2.3
+pyvis==0.3.2
+pydantic==2.10.6
+python-dotenv==1.0.1
+httpx==0.28.1

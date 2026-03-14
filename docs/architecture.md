@@ -70,8 +70,8 @@ The system prioritizes deterministic, explainable security scoring over black-bo
 
 Aggregates independent certificate-risk findings into `cert_score` (clamped 0..1), with findings text:
 
-- cert age < 7 days -> +0.25
-- cert age < 30 days -> +0.15
+- cert age < 7 days -> +0.25 (very young)
+- cert age < 30 days -> +0.15 (young, only if NOT already < 7 days; mutually exclusive tier via `elif`)
 - self-signed -> +0.35
 - Let's Encrypt + young domain -> +0.20
 - high SAN count + new SAN domains -> +0.25
