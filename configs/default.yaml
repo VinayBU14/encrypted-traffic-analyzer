@@ -1,1 +1,89 @@
 
+project:
+  name: "Spectra"
+  version: "v1.0.0"
+  schema_version: "v1.0.0"
+  log_level: "INFO"
+
+network:
+  tls_tcp_ports: [443, 8443]
+  tls_udp_ports: [443]
+  flow_timeout_seconds: 60
+  min_packets_per_flow: 3
+
+scoring:
+  weights:
+    ja3: 0.35
+    beacon: 0.25
+    cert: 0.20
+    graph: 0.20
+  thresholds:
+    clean: 0.30
+    low: 0.60
+    medium: 0.75
+    high: 0.90
+    critical: 1.00
+
+ja3:
+  score_malicious: 0.95
+  score_unknown: 0.10
+  score_benign: 0.00
+
+certificate:
+  very_young_days: 7
+  young_days: 30
+  short_validity_days: 7
+  scores:
+    very_young: 0.25
+    young: 0.15
+    self_signed: 0.35
+    letsencrypt_new_domain: 0.20
+    san_cluster: 0.25
+    fingerprint_in_bad_db: 0.40
+
+beacon:
+  min_flows_required: 5
+  anomalous_hour_start: 0
+  anomalous_hour_end: 6
+  weights:
+    regularity: 0.40
+    jitter: 0.25
+    payload: 0.20
+    time_independence: 0.15
+  thresholds:
+    jitter_cov_clean: 0.1
+    jitter_cov_max: 1.0
+
+graph:
+  scores:
+    cert_fanout: 0.35
+    malicious_ip: 0.45
+    multi_device: 0.50
+    known_campaign: 0.60
+  thresholds:
+    cert_fanout_min_domains: 3
+    multi_device_min_count: 2
+
+anomaly:
+  contamination: 0.05
+  n_estimators: 100
+  score_threshold: 0.70
+  composite_threshold: 0.50
+  uplift_factor: 0.60
+
+alerts:
+  suppress_seconds: 300
+  max_findings_per_alert: 10
+
+storage:
+  db_path: "data/spectra.db"
+  wal_mode: true
+
+api:
+  host: "0.0.0.0"
+  port: 8000
+  reload: false
+
+dashboard:
+  api_base_url: "http://localhost:8000"
+  refresh_interval_seconds: 5
