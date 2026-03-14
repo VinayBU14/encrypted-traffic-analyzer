@@ -6,7 +6,7 @@ project:
   log_level: "INFO"
 
 network:
-  tls_tcp_ports: [443, 8443]
+  tls_tcp_ports: [443, 8443,4430, 4431, 4432, 4433]
   tls_udp_ports: [443]
   flow_timeout_seconds: 60
   min_packets_per_flow: 3
