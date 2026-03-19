@@ -131,7 +131,7 @@ class CertificateAnalyzer:
                 f"Certificate covers {san_count} SANs (possible domain clustering)"
             )
         elif san_count >= 2:
-            composite += 0.10
+            composite += float(_SCORES.get("san_pair", 0.10))
             findings.append(f"Certificate covers {san_count} SANs")
 
         # --- Bad fingerprint check ---

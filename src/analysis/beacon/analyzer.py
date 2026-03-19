@@ -111,7 +111,7 @@ class BeaconAnalyzer:
                 f"({len(flows)} flows, interval ~{mean_interval:.0f}s, score={beacon_score:.2f})"
             )
             logger.warning("Beacon detected: %s", finding)
-        elif beacon_score >= 0.35:
+        elif beacon_score >= _THRESHOLDS.get("suspicious_score", 0.35):
             finding = (
                 f"Suspicious periodicity: {len(flows)} flows at ~{mean_interval:.0f}s intervals"
             )
