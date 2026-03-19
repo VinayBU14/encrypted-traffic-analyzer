@@ -39,6 +39,7 @@ certificate:
     self_signed: 0.35
     letsencrypt_new_domain: 0.20
     san_cluster: 0.25
+    san_pair: 0.10
     fingerprint_in_bad_db: 0.40
 
 beacon:
@@ -53,6 +54,7 @@ beacon:
   thresholds:
     jitter_cov_clean: 0.1
     jitter_cov_max: 1.0
+    suspicious_score: 0.35
 
 graph:
   scores:
