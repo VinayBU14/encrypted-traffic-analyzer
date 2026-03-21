@@ -2,7 +2,7 @@
 from __future__ import annotations
 import streamlit as st
 from src.dashboard import state
-from src.dashboard.views import alert_detail, graph_view, live_monitor, overview, session_timeline
+from src.dashboard.views import alert_detail, graph_view, live_capture_view, live_monitor, overview, session_timeline
 
 st.set_page_config(
     page_title="Spectra — Encrypted Traffic Analyzer",
@@ -147,8 +147,15 @@ summary { font-family:'Syne',sans-serif !important; font-size:0.75rem !important
 
 state.init()
 
-PAGES = ["Overview", "Live Monitor", "Alert Detail", "Graph View", "Session Timeline"]
-PAGE_ICONS = {"Overview":"◉","Live Monitor":"⬤","Alert Detail":"◈","Graph View":"◎","Session Timeline":"◷"}
+PAGES = ["Overview", "Live Monitor", "Live Capture", "Alert Detail", "Graph View", "Session Timeline"]
+PAGE_ICONS = {
+    "Overview": "◉",
+    "Live Monitor": "⬤",
+    "Live Capture": "◎",
+    "Alert Detail": "◈",
+    "Graph View": "◎",
+    "Session Timeline": "◷",
+}
 
 with st.sidebar:
     # Logo
@@ -242,6 +249,7 @@ with st.sidebar:
 # ── Route ──
 if page == "Overview":         overview.render()
 elif page == "Live Monitor":   live_monitor.render()
+elif page == "Live Capture":   live_capture_view.render()
 elif page == "Alert Detail":   alert_detail.render()
 elif page == "Graph View":     graph_view.render()
 elif page == "Session Timeline": session_timeline.render()
