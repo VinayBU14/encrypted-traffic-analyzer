@@ -227,6 +227,148 @@ def render() -> None:
                     'color:#334155;padding-top:10px">Removes from active feed. '
                     'Flow data is preserved.</div>', unsafe_allow_html=True)
 
+    st.markdown('<div style="height:22px"></div>', unsafe_allow_html=True)
+    st.markdown("""
+    <div style="font-family:'Syne',sans-serif;font-size:0.72rem;font-weight:700;
+                color:#334155;text-transform:uppercase;letter-spacing:0.12em;
+                margin-bottom:12px">Threat Explanation</div>
+    """, unsafe_allow_html=True)
+
+    explanation: dict[str, Any] | None = None
+    explanation_unavailable = False
+    try:
+        explanation = api_client._get(f"/alerts/{alert_id}/explain")
+    except ConnectionError:
+        explanation_unavailable = True
+    except Exception:
+        explanation = {}
+
+    if explanation_unavailable:
+        st.markdown(
+            '<div style="background:#0d1117;border:1px solid #1e2a3a;border-radius:10px;'
+            'padding:12px 14px;font-family:\'Syne\',sans-serif;color:#64748b">'
+            'Explanation unavailable</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        explanation = explanation or {}
+        ex_sev = str(explanation.get("severity", sev)).upper()
+        ex_headline = str(explanation.get("headline", f"{ex_sev} — Anomalous encrypted traffic pattern"))
+        ex_color = _SEVERITY_COLOR.get(ex_sev, "#eab308")
+        findings = explanation.get("technical_findings") or []
+        deviations = explanation.get("deviations") or []
+        plain_english = str(explanation.get("plain_english", "")).strip() or "AI analysis not available"
+        risk_factors = explanation.get("risk_factors") or []
+
+        st.markdown(
+            f'<div style="background:#0d1117;border:1px solid #1e2a3a;border-left:4px solid {ex_color};'
+            f'border-radius:10px;padding:14px 16px;margin-bottom:14px;">'
+            f'<div style="font-family:\'Syne\',sans-serif;font-size:1.1rem;font-weight:800;color:{ex_color};">'
+            f'⚠ {ex_headline}</div></div>',
+            unsafe_allow_html=True,
+        )
+
+        lcol, rcol = st.columns([1, 1])
+        with lcol:
+            st.markdown("""<div style="font-family:'Syne',sans-serif;font-size:0.68rem;font-weight:700;
+                           color:#334155;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px">
+                           Why this is suspicious</div>""", unsafe_allow_html=True)
+            if findings:
+                findings_html = "".join(
+                    f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.74rem;'
+                    f'color:#94a3b8;line-height:1.55;padding:5px 0">⚠ {item}</div>'
+                    for item in findings
+                )
+            else:
+                findings_html = (
+                    "<div style=\"font-family:'JetBrains Mono',monospace;font-size:0.74rem;"
+                    "color:#64748b\">⚠ No technical findings available</div>"
+                )
+            st.markdown(
+                f'<div style="background:#0d1117;border:1px solid #1e2a3a;border-radius:10px;'
+                f'padding:10px 12px;min-height:145px">{findings_html}</div>',
+                unsafe_allow_html=True,
+            )
+
+        with rcol:
+            st.markdown("""<div style="font-family:'Syne',sans-serif;font-size:0.68rem;font-weight:700;
+                           color:#334155;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px">
+                           Deviation from normal</div>""", unsafe_allow_html=True)
+            if deviations:
+                dev_rows = ""
+                for d in deviations:
+                    label = str(d.get("label", d.get("feature", "Feature")))
+                    observed = float(d.get("observed", 0.0))
+                    mean = float(d.get("baseline_mean", 0.0))
+                    std = float(d.get("baseline_std", 0.0))
+                    anomalous = bool(d.get("is_anomalous", False))
+                    observed_color = "#ef4444" if anomalous else "#94a3b8"
+                    dev_rows += (
+                        "<div style=\"display:grid;grid-template-columns:1.2fr 0.8fr 0.6fr 1.3fr;"
+                        "gap:8px;padding:6px 0;border-bottom:1px solid #0f1923\">"
+                        f"<div style=\"font-family:'Syne',sans-serif;font-size:0.74rem;color:#64748b\">{label}</div>"
+                        f"<div style=\"font-family:'JetBrains Mono',monospace;font-size:0.74rem;color:{observed_color}\">{observed:.1f}</div>"
+                        "<div style=\"font-family:'Syne',sans-serif;font-size:0.72rem;color:#334155\">vs</div>"
+                        f"<div style=\"font-family:'JetBrains Mono',monospace;font-size:0.74rem;color:#94a3b8\">{mean:.1f} ± {std:.1f}</div>"
+                        "</div>"
+                    )
+            else:
+                dev_rows = (
+                    "<div style=\"font-family:'JetBrains Mono',monospace;font-size:0.74rem;"
+                    "color:#64748b\">No baseline deviations available</div>"
+                )
+            st.markdown(
+                f'<div style="background:#0d1117;border:1px solid #1e2a3a;border-radius:10px;'
+                f'padding:10px 12px;min-height:145px">{dev_rows}</div>',
+                unsafe_allow_html=True,
+            )
+
+        st.markdown('<div style="height:12px"></div>', unsafe_allow_html=True)
+        st.markdown("""<div style="font-family:'Syne',sans-serif;font-size:0.68rem;font-weight:700;
+                       color:#334155;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px">
+                       AI Analysis</div>""", unsafe_allow_html=True)
+        st.markdown(
+            f'<div style="background:#0b1522;border:1px solid #1e2a3a;border-radius:10px;'
+            f'padding:14px 16px;margin-bottom:12px">'
+            f'<div style="font-family:\'Syne\',sans-serif;color:#60a5fa;font-size:0.82rem;'
+            f'margin-bottom:6px">🤖 Analyst Summary</div>'
+            f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.78rem;'
+            f'color:#cbd5e1;line-height:1.6">{plain_english}</div></div>',
+            unsafe_allow_html=True,
+        )
+
+        st.markdown("""<div style="font-family:'Syne',sans-serif;font-size:0.68rem;font-weight:700;
+                       color:#334155;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px">
+                       Risk Factors</div>""", unsafe_allow_html=True)
+        if risk_factors:
+            badge_html = ""
+            for rf in risk_factors:
+                txt = str(rf)
+                low = txt.lower()
+                if any(k in low for k in ("critical", "malicious", "c2", "beacon", "far outside")):
+                    bgc, bc, fc = "#2d0a0a", "#7f1d1d", "#f87171"
+                elif any(k in low for k in ("high", "certificate", "fingerprint", "suspicious")):
+                    bgc, bc, fc = "#2d1200", "#7c2d12", "#fb923c"
+                else:
+                    bgc, bc, fc = "#2d2000", "#78350f", "#fbbf24"
+                badge_html += (
+                    f"<span style=\"display:inline-block;margin:0 8px 8px 0;padding:6px 10px;"
+                    f"border-radius:999px;border:1px solid {bc};background:{bgc};"
+                    f"font-family:'Syne',sans-serif;font-size:0.7rem;font-weight:700;color:{fc};\">{txt}</span>"
+                )
+            st.markdown(
+                f'<div style="background:#0d1117;border:1px solid #1e2a3a;border-radius:10px;'
+                f'padding:12px 12px">{badge_html}</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<div style="background:#0d1117;border:1px solid #1e2a3a;border-radius:10px;'
+                'padding:12px 14px;font-family:\'JetBrains Mono\',monospace;font-size:0.74rem;'
+                'color:#64748b">No explicit risk factors available</div>',
+                unsafe_allow_html=True,
+            )
+
     
     src_ip = alert.get("src_ip", "")
     if src_ip:
