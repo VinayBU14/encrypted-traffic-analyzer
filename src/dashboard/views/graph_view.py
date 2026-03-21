@@ -10,7 +10,11 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-from pyvis.network import Network
+try:
+    from pyvis.network import Network
+    _PYVIS_AVAILABLE = True
+except ImportError:
+    _PYVIS_AVAILABLE = False
 
 from src.dashboard import api_client, state
 
@@ -98,6 +102,12 @@ def _render_graph(net: Network) -> None:
 
 
 def render() -> None:
+    if not _PYVIS_AVAILABLE:
+        st.error(
+            "pyvis is not installed. Run: pip install pyvis"
+        )
+        return
+
     st.markdown("""
     <div class="page-header">
         <div class="page-header-icon" style="background:#0d1a1a;">◎</div>
