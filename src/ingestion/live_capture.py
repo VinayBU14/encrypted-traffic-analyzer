@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import subprocess
+import sys
 from typing import Any, Generator
 
 import pyshark
@@ -32,6 +34,16 @@ class LiveCaptureReader:
 
     def start_capture(self) -> Generator[dict[str, Any], None, None]:
         """Start live capture and yield normalized+filtered packets until stopped or limit reached."""
+        # Ensure this thread has an event loop — pyshark requires one
+        if sys.platform == "win32":
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                raise RuntimeError("loop closed")
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
         capture: pyshark.LiveCapture | None = None
         captured_count = 0
         self._running = True
@@ -40,9 +52,9 @@ class LiveCaptureReader:
             capture_kwargs: dict[str, Any] = {"interface": self._interface}
             if self._bpf_filter.strip():
                 capture_kwargs["bpf_filter"] = self._bpf_filter
-            capture = pyshark.LiveCapture(**capture_kwargs)
+            capture = pyshark.LiveCapture(**capture_kwargs, eventloop=loop)
             packet_counter = 0
-            for packet in capture.sniff_continuously():
+            for packet in capture.sniff_continuously(packet_count=0):
                 if not self._running:
                     break
                 packet_counter += 1
@@ -89,5 +101,6 @@ class LiveCaptureReader:
                     name = line.split("(")[-1].rstrip(")")
                     interfaces.append(name.strip())
             return interfaces if interfaces else ["Wi-Fi", "Ethernet"]
-        except Exception:
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Failed to list interfaces via tshark -D: %s", exc)
             return ["Wi-Fi", "Ethernet"]

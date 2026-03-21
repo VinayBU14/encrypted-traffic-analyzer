@@ -143,7 +143,6 @@ def render() -> None:
         st.info("All alerts are suppressed. Enable 'Suppressed' to view them.")
         return
 
-    
     st.markdown(f"""
     <div style="display:flex;justify-content:space-between;align-items:center;
                 margin-bottom:10px;">
@@ -153,53 +152,75 @@ def render() -> None:
         </div>
     </div>""", unsafe_allow_html=True)
 
-    
-    hcols = st.columns([1.6, 1.5, 1.2, 0.9, 1.5, 1.6, 1.8, 0.8])
-    for col, h in zip(hcols, ["Time (UTC)", "Alert ID", "Severity", "Score",
-                                "Source IP", "Dest IP", "Domain", ""]):
-        col.markdown(f"""<div style="font-family:'Syne',sans-serif;font-size:0.68rem;
-                         font-weight:700;color:#334155;text-transform:uppercase;
-                         letter-spacing:0.08em;padding:6px 0 8px">{h}</div>""",
-                     unsafe_allow_html=True)
+    alert_by_id = {a.get("alert_id", ""): a for a in alerts}
 
-    
+    hcols = st.columns([1.1, 1.5, 1.2, 1.6, 2.5, 1.4, 1.0])
+    for col, h in zip(
+        hcols,
+        ["Severity", "Score", "Source IP", "Destination", "Top Signal", "Time", "Actions"],
+    ):
+        col.markdown(
+            f"""<div style="font-family:'Syne',sans-serif;font-size:0.68rem;
+            font-weight:700;color:#334155;text-transform:uppercase;
+            letter-spacing:0.08em;padding:6px 0 8px">{h}</div>""",
+            unsafe_allow_html=True,
+        )
+
     for _, row in df.iterrows():
-        sev   = row["severity"]
+        sev = row["severity"]
         color = _SEVERITY_COLOR.get(sev, "#64748b")
-        bg    = _SEVERITY_BG.get(sev, "#0d1117")
         score = float(row["composite_score"])
-        pct   = int(score * 100)
+        pct = int(score * 100)
+        aid = row["alert_id"]
+        raw = alert_by_id.get(aid, {})
+        findings = raw.get("findings") or []
+        if findings:
+            top_signal = str(findings[0])
+            if len(top_signal) > 40:
+                top_signal = f"{top_signal[:40]}…"
+        else:
+            top_signal = f"JA3:{float(raw.get('ja3_score', 0.0)):.2f} BCN:{float(raw.get('beacon_score', 0.0)):.2f}"
+        destination = row["dst_domain"] or row["dst_ip"] or "—"
 
-        c1, c2, c3, c4, c5, c6, c7, c8 = st.columns([1.6, 1.5, 1.2, 0.9, 1.5, 1.6, 1.8, 0.8])
-
-        c1.markdown(f'<div class="mono" style="padding:6px 0">{row["timestamp"]}</div>',
-                    unsafe_allow_html=True)
-        c2.markdown(f'<div class="mono" style="padding:6px 0;color:#334155">'
-                    f'{row["alert_id"][:14]}…</div>', unsafe_allow_html=True)
-        c3.markdown(f'<div style="padding:6px 0">'
-                    f'<span class="badge badge-{sev.lower()}">{sev}</span></div>',
-                    unsafe_allow_html=True)
-        c4.markdown(f"""
-        <div style="padding:6px 0">
-            <div style="font-family:'JetBrains Mono',monospace;font-size:0.82rem;
+        c1, c2, c3, c4, c5, c6, c7 = st.columns([1.1, 1.5, 1.2, 1.6, 2.5, 1.4, 1.0])
+        c1.markdown(
+            f'<div style="padding:6px 0"><span class="badge badge-{sev.lower()}">{sev}</span></div>',
+            unsafe_allow_html=True,
+        )
+        c2.markdown(
+            f"""
+        <div style="padding:4px 0">
+            <div style="font-family:'JetBrains Mono',monospace;font-size:0.78rem;
                         color:{color};font-weight:600">{score:.3f}</div>
             <div class="score-track">
                 <div class="score-fill" style="width:{pct}%;background:{color}"></div>
             </div>
-        </div>""", unsafe_allow_html=True)
-        c5.markdown(f'<div class="mono" style="padding:6px 0">{row["src_ip"]}</div>',
-                    unsafe_allow_html=True)
-        c6.markdown(f'<div class="mono" style="padding:6px 0;color:#334155">'
-                    f'{row["dst_ip"] or "—"}</div>', unsafe_allow_html=True)
-        c7.markdown(f'<div class="mono" style="padding:6px 0;color:#334155">'
-                    f'{row["dst_domain"] or "—"}</div>', unsafe_allow_html=True)
+        </div>""",
+            unsafe_allow_html=True,
+        )
+        c3.markdown(f'<div class="mono" style="padding:6px 0">{row["src_ip"]}</div>', unsafe_allow_html=True)
+        c4.markdown(
+            f'<div class="mono" style="padding:6px 0;color:#94a3b8" title="{destination}">{destination}</div>',
+            unsafe_allow_html=True,
+        )
+        c5.markdown(
+            f'<div class="mono" style="padding:6px 0;color:#64748b" title="{top_signal}">{top_signal}</div>',
+            unsafe_allow_html=True,
+        )
+        c6.markdown(f'<div class="mono" style="padding:6px 0">{row["timestamp"]}</div>', unsafe_allow_html=True)
 
-        if c8.button("→", key=f"lm_{row['alert_id']}", use_container_width=True):
-            state.set_selected_alert(row["alert_id"])
+        a1, a2 = c7.columns(2)
+        if a1.button("→", key=f"lm_open_{aid}", use_container_width=True):
+            state.set_selected_alert(aid)
             st.rerun()
+        if a2.button("✕", key=f"lm_sup_{aid}", use_container_width=True):
+            try:
+                api_client.suppress_alert(aid)
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Suppress failed: {exc}")
 
-        st.markdown('<div style="border-bottom:1px solid #0f1923;margin:0 0 2px"></div>',
-                    unsafe_allow_html=True)
+        st.markdown('<div style="border-bottom:1px solid #0f1923;margin:0 0 2px"></div>', unsafe_allow_html=True)
 
     # ── Auto-refresh ──
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
