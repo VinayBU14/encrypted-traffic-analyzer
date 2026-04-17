@@ -1,5 +1,3 @@
-
-
 from __future__ import annotations
 
 import json
@@ -89,16 +87,21 @@ def _build_graph(nodes: list[dict], edges: list[dict]) -> Network:
 
 
 def _render_graph(net: Network) -> None:
-    with tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w") as f:
-        net.save_graph(f.name)
-        path = f.name
+    # Windows locks NamedTemporaryFile while the handle is open, so we
+    # create the file, close it explicitly, then let pyvis write to the path.
+    _tmp = tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w")
+    _path = _tmp.name
+    _tmp.close()  # release the lock before pyvis opens the same path
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            html = f.read()
+        net.save_graph(_path)
+        with open(_path, "r", encoding="utf-8") as fh:
+            html = fh.read()
         components.html(html, height=600, scrolling=False)
     finally:
-        try: os.unlink(path)
-        except OSError: pass
+        try:
+            os.unlink(_path)
+        except OSError:
+            pass
 
 
 def render() -> None:

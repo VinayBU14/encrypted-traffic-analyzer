@@ -133,6 +133,13 @@ def explain_alert(alert_id: str, conn: DBConn = None) -> dict:
         return result
 
 
+@router.get("/src/{src_ip}", response_model=list[AlertResponse])
+def get_alerts_by_ip(src_ip: str, conn: DBConn = None) -> list[dict]:
+    """Return all alerts for a given source IP."""
+    alerts = alert_repository.get_alerts_by_src_ip(conn, src_ip)
+    return [_alert_to_response(a) for a in alerts]
+
+
 @router.get("/{alert_id}", response_model=AlertResponse)
 def get_alert(alert_id: str, conn: DBConn = None) -> dict:
     """Return a single alert by alert_id."""
@@ -150,10 +157,3 @@ def suppress_alert(alert_id: str, conn: DBConn = None) -> dict:
         raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
     alert_repository.suppress_alert(conn, alert_id)
     return {"status": "suppressed", "alert_id": alert_id}
-
-
-@router.get("/src/{src_ip}", response_model=list[AlertResponse])
-def get_alerts_by_ip(src_ip: str, conn: DBConn = None) -> list[dict]:
-    """Return all alerts for a given source IP."""
-    alerts = alert_repository.get_alerts_by_src_ip(conn, src_ip)
-    return [_alert_to_response(a) for a in alerts]
