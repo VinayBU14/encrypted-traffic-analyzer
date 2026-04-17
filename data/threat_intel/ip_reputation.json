@@ -23,5 +23,30 @@
     "172.67.132.53",
     "45.33.32.156",
     "198.199.119.0"
-  ]
+  ],
+  "162.243.103.246": {
+    "score": 1.0,
+    "label": "Feodo:Emotet",
+    "source": "feodotracker.abuse.ch"
+  },
+  "50.16.16.211": {
+    "score": 1.0,
+    "label": "Feodo:QakBot",
+    "source": "feodotracker.abuse.ch"
+  },
+  "34.204.119.63": {
+    "score": 1.0,
+    "label": "Feodo:QakBot",
+    "source": "feodotracker.abuse.ch"
+  },
+  "178.62.3.223": {
+    "score": 1.0,
+    "label": "Feodo:QakBot",
+    "source": "feodotracker.abuse.ch"
+  },
+  "27.133.154.218": {
+    "score": 1.0,
+    "label": "Feodo:QakBot",
+    "source": "feodotracker.abuse.ch"
+  }
 }

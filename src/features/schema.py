@@ -1,4 +1,3 @@
-
 """Canonical V1 feature schema definitions shared by training and inference stages."""
 
 from typing import TypedDict
@@ -45,13 +44,36 @@ TLS_FEATURE_COLUMNS: list[str] = [
 
 ALL_FEATURE_COLUMNS: list[str] = FLOW_FEATURE_COLUMNS + TLS_FEATURE_COLUMNS
 
+# FIXED: was referencing non-existent columns (regularity_score, payload_consistency, etc.)
+# Now maps directly to columns that ARE produced by FlowFeatureExtractor + TLSFeatureExtractor.
+# This is what the IsolationForest model trains and scores against.
 SCORING_FEATURE_COLUMNS: list[str] = [
-    "regularity_score",
-    "payload_consistency",
-    "cert_age_normalized",
-    "tls_version_encoded",
-    "bytes_per_second",
-    "packet_rate",
+    # Flow features
+    "duration_ms",
+    "total_packets",
+    "total_bytes",
+    "fwd_bytes",
+    "bwd_bytes",
+    "packet_rate_per_sec",
+    "byte_rate_per_sec",
+    "avg_packet_size",
+    "std_packet_size",
+    "mean_iat_ms",
+    "std_iat_ms",
+    "syn_count",
+    "rst_count",
+    "psh_count",
+    # TLS features
+    "tls_seen",
+    "tls_version_code",
+    "tls_cipher_suite_count",
+    "tls_extension_count",
+    "tls_sni_present",
+    "tls_cert_present",
+    "tls_cert_validity_days",
+    "tls_cert_self_signed",
+    "tls_cert_san_count",
+    "tls_cert_age_days",
 ]
 
 

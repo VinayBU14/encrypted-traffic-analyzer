@@ -1,8 +1,15 @@
-
 from __future__ import annotations
 import streamlit as st
 from src.dashboard import state
-from src.dashboard.views import alert_detail, graph_view, live_capture_view, live_monitor, overview, session_timeline
+from src.dashboard.views import (
+    alert_detail,
+    graph_view,
+    live_capture_view,
+    live_monitor,
+    overview,
+    pcap_upload_view,
+    session_timeline,
+)
 
 st.set_page_config(
     page_title="Spectra — Encrypted Traffic Analyzer",
@@ -112,6 +119,12 @@ summary { font-family:'Syne',sans-serif !important; font-size:0.75rem !important
 /* ── Alerts ── */
 .stAlert { border-radius:10px !important; font-family:'Syne',sans-serif !important; font-size:0.88rem !important; }
 
+/* ── File uploader ── */
+[data-testid="stFileUploader"] {
+    background:#0d1117 !important; border:1px solid #1e2a3a !important;
+    border-radius:10px !important;
+}
+
 /* ── Scrollbar ── */
 ::-webkit-scrollbar { width:4px; height:4px; }
 ::-webkit-scrollbar-track { background:#060a10; }
@@ -147,9 +160,19 @@ summary { font-family:'Syne',sans-serif !important; font-size:0.75rem !important
 
 state.init()
 
-PAGES = ["Overview", "Live Monitor", "Live Capture", "Alert Detail", "Graph View", "Session Timeline"]
+# UPDATED: Added "PCAP Upload" page
+PAGES = [
+    "Overview",
+    "PCAP Upload",
+    "Live Monitor",
+    "Live Capture",
+    "Alert Detail",
+    "Graph View",
+    "Session Timeline",
+]
 PAGE_ICONS = {
     "Overview": "◉",
+    "PCAP Upload": "⬆",
     "Live Monitor": "⬤",
     "Live Capture": "◎",
     "Alert Detail": "◈",
@@ -158,7 +181,6 @@ PAGE_ICONS = {
 }
 
 with st.sidebar:
-    # Logo
     st.markdown("""
     <div style="padding:4px 2px 24px">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
@@ -186,7 +208,6 @@ with st.sidebar:
     page = st.radio("Nav", PAGES, index=PAGES.index(active), label_visibility="collapsed")
     state.set_active_page(page)
 
-    # Severity legend
     st.markdown("""
     <div style="margin-top:24px;background:#060a10;border:1px solid #111827;
                 border-radius:10px;padding:14px 16px">
@@ -246,10 +267,11 @@ with st.sidebar:
         spectra v1.0.0 · AI traffic analysis</div>
     """, unsafe_allow_html=True)
 
-# ── Route ──
-if page == "Overview":         overview.render()
-elif page == "Live Monitor":   live_monitor.render()
-elif page == "Live Capture":   live_capture_view.render()
-elif page == "Alert Detail":   alert_detail.render()
-elif page == "Graph View":     graph_view.render()
-elif page == "Session Timeline": session_timeline.render()
+# ── Route ──────────────────────────────────────────────────────────────────────
+if page == "Overview":            overview.render()
+elif page == "PCAP Upload":       pcap_upload_view.render()
+elif page == "Live Monitor":      live_monitor.render()
+elif page == "Live Capture":      live_capture_view.render()
+elif page == "Alert Detail":      alert_detail.render()
+elif page == "Graph View":        graph_view.render()
+elif page == "Session Timeline":  session_timeline.render()

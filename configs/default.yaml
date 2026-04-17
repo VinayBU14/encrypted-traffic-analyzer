@@ -1,4 +1,3 @@
-
 project:
   name: "Spectra"
   version: "v1.0.0"
@@ -6,10 +5,12 @@ project:
   log_level: "INFO"
 
 network:
-  tls_tcp_ports: [443, 8443,4430, 4431, 4432, 4433]
+  # Expanded: covers SMTP/S, IMAPS, POPS, common alt-HTTPS, QUIC
+  tls_tcp_ports: [443, 465, 587, 636, 993, 995, 8443, 8080, 9443, 4430, 4431, 4432, 4433]
   tls_udp_ports: [443]
   flow_timeout_seconds: 60
-  min_packets_per_flow: 3
+  # FIXED: was 3, which silently dropped most real-world short-lived TLS flows
+  min_packets_per_flow: 1
 
 scoring:
   weights:
