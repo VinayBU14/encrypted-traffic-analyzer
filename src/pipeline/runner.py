@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -33,7 +34,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def run_pipeline(pcap_path: str, retrain: bool = False) -> dict:
+def run_pipeline(pcap_path: str, retrain: bool = False, clear: bool = False) -> dict:
     """Run the full Spectra pipeline on a PCAP file.
 
     Stages:
@@ -46,12 +47,23 @@ def run_pipeline(pcap_path: str, retrain: bool = False) -> dict:
     Args:
         pcap_path: Path to the .pcap file to analyse.
         retrain: If True, retrain the anomaly model on this PCAP's features.
+        clear: If True, wipe flows/alerts/tls_sessions before running (prevents stale accumulation).
 
     Returns:
         Summary dict with pipeline statistics.
     """
     start_time = time.time()
     logger.info("=== Spectra pipeline starting: %s ===", pcap_path)
+
+    # --- Optionally clear stale DB data before ingestion ---
+    if clear:
+        db_path = PROJECT_ROOT / "data" / "spectra.db"
+        with sqlite3.connect(str(db_path)) as _clear_conn:
+            _clear_conn.execute("DELETE FROM alerts")
+            _clear_conn.execute("DELETE FROM flows")
+            _clear_conn.execute("DELETE FROM tls_sessions")
+            _clear_conn.commit()
+        logger.info("[runner] DB cleared (alerts, flows, tls_sessions).")
 
     # --- Stage 1: Ingestion + flow reconstruction + feature engineering ---
     orchestrator = PipelineOrchestrator(pcap_path)
@@ -224,13 +236,17 @@ def main() -> int:
         "--retrain", action="store_true",
         help="Retrain the anomaly detection model on this PCAP's features"
     )
+    parser.add_argument(
+        "--clear", action="store_true",
+        help="Clear flows, alerts, and tls_sessions from DB before running"
+    )
     args = parser.parse_args()
 
     if not Path(args.pcap).is_file():
         logger.error("PCAP file not found: %s", args.pcap)
         return 1
 
-    summary = run_pipeline(args.pcap, retrain=args.retrain)
+    summary = run_pipeline(args.pcap, retrain=args.retrain, clear=args.clear)
 
     print("\n=== Spectra Pipeline Summary ===")
     for key, value in summary.items():
