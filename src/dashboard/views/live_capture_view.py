@@ -82,7 +82,7 @@ def _poll_once():
 
     try:
         alerts = requests.get(
-            f"{API_BASE}/capture/recent-alerts?limit=50&live_only=0", timeout=3
+            f"{API_BASE}/capture/recent-alerts?limit=50&live_only=1", timeout=3
         ).json()
         if alerts:
             st.session_state["cap_alerts"] = alerts.get("alerts", [])
