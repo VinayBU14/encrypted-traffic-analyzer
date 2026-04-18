@@ -95,15 +95,21 @@ def render() -> None:
     c1, c2, c3, c4, c5 = st.columns([1.5, 2, 2, 2, 1])
     with c1:
         capture_running = _is_capture_running()
-        default_src = "Live Only" if capture_running else "All"
         source_opts = ["All", "Live Only", "PCAP Only"]
+        # Force "Live Only" every render while capture is active
+        if capture_running:
+            st.session_state["lm_source"] = "Live Only"
+        elif "lm_source" not in st.session_state:
+            st.session_state["lm_source"] = "All"
         source_label = st.selectbox(
             "Source",
             source_opts,
-            index=source_opts.index(st.session_state.get("lm_source", default_src)),
+            index=source_opts.index(st.session_state["lm_source"]),
             key="lm_source_sel",
+            disabled=capture_running,
         )
-        st.session_state["lm_source"] = source_label
+        if not capture_running:
+            st.session_state["lm_source"] = source_label
 
     source_param = {"Live Only": "live", "PCAP Only": "pcap"}.get(source_label, None)
 

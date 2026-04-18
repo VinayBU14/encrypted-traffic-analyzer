@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 router  = APIRouter(prefix="/capture", tags=["capture"])
 DBConn  = Annotated[sqlite3.Connection, Depends(get_db_conn)]
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[4]
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DB_PATH      = os.getenv("SPECTRA_DB", str(_PROJECT_ROOT / "data" / "spectra.db"))
 _MODEL_PATH  = _PROJECT_ROOT / "models" / "isolation_forest.joblib"
 _SCALER_PATH = _PROJECT_ROOT / "models" / "scaler.joblib"
@@ -504,6 +504,23 @@ _session = _CaptureSession()
 
 # ── Score + store one completed flow ──────────────────────────────────────────
 
+def _ensure_alert_columns(conn: sqlite3.Connection) -> None:
+    """Add columns to alerts table that may be missing in older databases."""
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(alerts)").fetchall()}
+    additions = [
+        ("dst_port",  "INTEGER DEFAULT 0"),
+        ("is_live",   "INTEGER DEFAULT 0"),
+    ]
+    for col, definition in additions:
+        if col not in existing:
+            try:
+                conn.execute(f"ALTER TABLE alerts ADD COLUMN {col} {definition}")
+                conn.commit()
+                logger.info("Added missing column alerts.%s", col)
+            except Exception:
+                pass  # Already exists or DB locked — safe to ignore
+
+
 def _score_and_store(flow: dict, db_path: str = None) -> Optional[dict]:
     db_path = db_path or DB_PATH
 
@@ -562,7 +579,10 @@ def _score_and_store(flow: dict, db_path: str = None) -> Optional[dict]:
 
     try:
         conn = sqlite3.connect(db_path, timeout=10)
+        conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
+        # Add missing columns to alerts table if they don't exist (one-time migration)
+        _ensure_alert_columns(conn)
         dur_s = flow.get("duration_ms", 0) / 1000.0
 
         # ── flows table ───────────────────────────────────────────────────────
@@ -645,18 +665,26 @@ def _score_and_store(flow: dict, db_path: str = None) -> Optional[dict]:
         "is_beacon": int(is_beacon),
     }
 
-    # Supabase + Groq for HIGH/CRITICAL
-    if sev in ("HIGH", "CRITICAL"):
-        def _bg():
+    # Mirror ALL anomaly alerts to Supabase; Groq analysis for HIGH/CRITICAL only
+    def _bg():
+        # Always push to Supabase so alert_id is recorded for every detection
+        try:
+            from src.integrations.supabase_client import mirror_alert_any_severity
+            mirror_alert_any_severity(result)
+        except Exception:
             try:
                 from src.integrations.supabase_client import mirror_alert
                 mirror_alert(result)
-            except Exception: pass
+            except Exception:
+                pass
+        # AI explanation only for serious alerts
+        if sev in ("HIGH", "CRITICAL"):
             try:
                 from src.integrations.groq_client import analyse_and_store
                 analyse_and_store(result, db_path)
-            except Exception: pass
-        threading.Thread(target=_bg, daemon=True).start()
+            except Exception:
+                pass
+    threading.Thread(target=_bg, daemon=True).start()
 
     return result
 

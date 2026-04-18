@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from typing import Annotated, Any
 
@@ -15,46 +16,61 @@ router = APIRouter(prefix="/flows", tags=["flows"])
 DBConn = Annotated[sqlite3.Connection, Depends(get_db_conn)]
 
 
+def _parse_tcp_flags(value: Any) -> dict:
+    """Always return a dict regardless of whether value is a string or dict."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except (json.JSONDecodeError, ValueError):
+            return {}
+    return {}
+
+
 def _flow_to_response(flow) -> dict:
     if isinstance(flow, dict):
         return {
-            "flow_id":       flow.get("flow_id", ""),
-            "src_ip":        flow.get("src_ip", ""),
-            "dst_ip":        flow.get("dst_ip", ""),
-            "src_port":      flow.get("src_port", 0),
-            "dst_port":      flow.get("dst_port", 0),
-            "protocol":      flow.get("protocol", ""),
-            "start_time":    flow.get("start_time"),
-            "end_time":      flow.get("end_time"),
-            "duration_ms":   flow.get("duration_ms"),
-            "packet_count":  flow.get("packet_count", 0),
-            "bytes_total":   flow.get("bytes_total", 0),
-            "upload_bytes":  flow.get("upload_bytes", 0),
-            "download_bytes":flow.get("download_bytes", 0),
-            "status":        flow.get("status", ""),
-            "tcp_flags":     flow.get("tcp_flags", {}),
-            "is_live":       flow.get("is_live", 0),
-            "severity":      flow.get("severity", ""),
+            "flow_id":        flow.get("flow_id", ""),
+            "src_ip":         flow.get("src_ip", ""),
+            "dst_ip":         flow.get("dst_ip", ""),
+            "src_port":       flow.get("src_port", 0),
+            "dst_port":       flow.get("dst_port", 0),
+            "protocol":       flow.get("protocol", ""),
+            "start_time":     flow.get("start_time", 0.0),
+            "end_time":       flow.get("end_time"),
+            "duration_ms":    flow.get("duration_ms"),
+            "packet_count":   flow.get("packet_count", 0),
+            "bytes_total":    flow.get("bytes_total", 0),
+            "upload_bytes":   flow.get("upload_bytes", 0),
+            "download_bytes": flow.get("download_bytes", 0),
+            "status":         flow.get("status", ""),
+            "tcp_flags":      _parse_tcp_flags(flow.get("tcp_flags", {})),
+            "is_live":        flow.get("is_live", 0),
+            "severity":       flow.get("severity", ""),
             "composite_score": flow.get("composite_score", 0),
         }
     return {
-        "flow_id":       flow.flow_id,
-        "src_ip":        flow.src_ip,
-        "dst_ip":        flow.dst_ip,
-        "src_port":      flow.src_port,
-        "dst_port":      flow.dst_port,
-        "protocol":      flow.protocol,
-        "start_time":    flow.start_time,
-        "end_time":      flow.end_time,
-        "duration_ms":   flow.duration_ms,
-        "packet_count":  flow.packet_count,
-        "bytes_total":   flow.bytes_total,
-        "upload_bytes":  flow.upload_bytes,
-        "download_bytes":flow.download_bytes,
-        "status":        flow.status,
-        "tcp_flags":     flow.tcp_flags,
-        "is_live":       0,
-        "severity":      "",
+        "flow_id":        flow.flow_id,
+        "src_ip":         flow.src_ip,
+        "dst_ip":         flow.dst_ip,
+        "src_port":       flow.src_port,
+        "dst_port":       flow.dst_port,
+        "protocol":       flow.protocol,
+        "start_time":     flow.start_time,
+        "end_time":       flow.end_time,
+        "duration_ms":    flow.duration_ms,
+        "packet_count":   flow.packet_count,
+        "bytes_total":    flow.bytes_total,
+        "upload_bytes":   flow.upload_bytes,
+        "download_bytes": flow.download_bytes,
+        "status":         flow.status,
+        "tcp_flags":      _parse_tcp_flags(flow.tcp_flags),
+        "is_live":        0,
+        "severity":       "",
         "composite_score": 0,
     }
 

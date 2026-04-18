@@ -45,18 +45,26 @@ THREAT_ICONS = {
 
 # ── Data helpers ──────────────────────────────────────────────────────────────
 
-def _load_alerts(limit: int = 200) -> list[dict]:
+def _is_capture_running() -> bool:
+    try:
+        import requests
+        r = requests.get("http://localhost:8000/capture/status", timeout=2)
+        return r.json().get("running", False)
+    except Exception:
+        return False
+
+
+def _load_alerts(limit: int = 200, source: str | None = None) -> list[dict]:
+    """Load alerts from DB. source='live'|'pcap'|None (all)"""
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
 
-        # Check which columns exist so we order by the right one
         cols = {r[1] for r in conn.execute("PRAGMA table_info(alerts)").fetchall()}
         if not cols:
             st.error("DB error: no such table: alerts — run init_db.py first.")
             return []
 
-        # Prefer composite_score for ordering; fall back to timestamp / created_at
         if "composite_score" in cols:
             order = "composite_score DESC"
         elif "timestamp" in cols:
@@ -64,8 +72,14 @@ def _load_alerts(limit: int = 200) -> list[dict]:
         else:
             order = "rowid DESC"
 
+        where = ""
+        if source == "live" and "is_live" in cols:
+            where = "WHERE is_live=1"
+        elif source == "pcap" and "is_live" in cols:
+            where = "WHERE (is_live=0 OR is_live IS NULL)"
+
         rows = conn.execute(
-            f"SELECT * FROM alerts ORDER BY {order} LIMIT ?", (limit,)
+            f"SELECT * FROM alerts {where} ORDER BY {order} LIMIT ?", (limit,)
         ).fetchall()
         conn.close()
         return [dict(r) for r in rows]
@@ -214,9 +228,25 @@ def _groq_panel(alert: dict):
 # ── Main render ───────────────────────────────────────────────────────────────
 
 def render():
-    alerts = _load_alerts()
+    capture_running = _is_capture_running()
+    if capture_running:
+        st.session_state["ad_source"] = "live"
+    elif "ad_source" not in st.session_state:
+        st.session_state["ad_source"] = None
+
+    if capture_running:
+        st.markdown(
+            '<div style="background:#0d2137;border:1px solid #1f6feb33;border-radius:6px;'
+            'padding:6px 12px;font-size:12px;color:#58a6ff;margin-bottom:8px">'
+            '⊙ Live capture active — showing live-captured alerts only</div>',
+            unsafe_allow_html=True,
+        )
+
+    source_param = st.session_state["ad_source"]
+    alerts = _load_alerts(source=source_param)
     if not alerts:
-        st.warning("No alerts in database.")
+        msg = "No live alerts yet — start a capture first." if capture_running else "No alerts in database."
+        st.warning(msg)
         return
 
     # Alert selector

@@ -106,8 +106,11 @@ def get_flows_by_pair(src_ip: str, dst_ip: str) -> list[dict[str, Any]]:
     return _get(f"/flows/src/{src_ip}", params={"dst_ip": dst_ip})
 
 
-def get_graph(limit: int = 1000) -> dict[str, Any]:
-    return _get("/entities/graph", params={"limit": limit})
+def get_graph(limit: int = 1000, source: str | None = None) -> dict[str, Any]:
+    params: dict[str, Any] = {"limit": limit}
+    if source in ("live", "pcap"):
+        params["source"] = source
+    return _get("/entities/graph", params=params)
 
 
 def get_high_risk_nodes(threshold: float = 0.30, limit: int = 1000) -> list[dict[str, Any]]:

@@ -16,6 +16,15 @@ except ImportError:
 
 from src.dashboard import api_client, state
 
+
+def _is_capture_running() -> bool:
+    try:
+        import requests
+        r = requests.get("http://localhost:8000/capture/status", timeout=2)
+        return r.json().get("running", False)
+    except Exception:
+        return False
+
 _NODE_TYPE_SHAPE = {"ip":"dot","domain":"diamond","certificate":"triangle","asn":"square","device":"star"}
 _NODE_TYPE_ICON  = {"ip":"🌐","domain":"🔗","certificate":"🔒","asn":"🏢","device":"💻"}
 _EDGE_TYPE_DASH  = {"contacted":False,"resolves_to":True,"uses":False,"covers":True}
@@ -135,7 +144,9 @@ def render() -> None:
 
     with st.spinner("Building graph…"):
         try:
-            gdata     = api_client.get_graph(limit=glimit)
+            capture_running = _is_capture_running()
+            source_param = "live" if capture_running else None
+            gdata     = api_client.get_graph(limit=glimit, source=source_param)
             high_risk = api_client.get_high_risk_nodes(threshold=threshold, limit=glimit)
         except ConnectionError as exc:
             st.error(f"API Unavailable — {exc}"); return
