@@ -3,20 +3,14 @@ src/api/routers/capture.py
 Live capture router — start/stop real-time packet capture and stream results.
 
 Fixes in this version:
-  - src_ip/src_port always = the CLIENT side (higher ephemeral port),
-    dst_ip/dst_port always = the SERVER side (lower well-known port).
-    Previously the 5-tuple was sorted lexicographically which swapped them,
-    causing src_port=0 and wrong directions in all downstream views.
-  - All five module scores (anomaly, ja3, beacon, cert, graph) are written to
-    both the flows and alerts tables, so the alert detail risk-factor bars
-    show real values instead of all-zero.
-  - composite_score is capped correctly; anomaly=1 no longer forces it to 1.0
-    while other modules are 0 — the weighted formula is used properly.
-  - Windows: BPF filter is not passed to Scapy (Npcap BPF is unreliable);
-    Python-level port filtering keeps only TCP/UDP traffic.
-  - Interface list returns {friendly, npf_path} dicts with Wi-Fi sorted first.
-  - Flow timeout 15 s / early-emit after 10 packets for fast feedback.
-  - Supabase + Groq run in one background thread for HIGH/CRITICAL alerts.
+  - FIX 409 on start: _session.running is force-reset to False + thread joined
+    if the sniff thread died without clearing the flag.  A /start call now
+    always succeeds when no live capture is actually running.
+  - FIX 409 on stop: /stop is idempotent — returns 200 with stopped=False when
+    no capture was running rather than raising 409.
+  - FIX live-monitor "always running": /status reflects the ACTUAL thread state,
+    not just the boolean flag, so stale True values are corrected automatically.
+  - All previous fixes retained (drain thread, WAL mode, Windows BPF, etc.).
 """
 
 from __future__ import annotations
@@ -240,13 +234,6 @@ class _FlowAccumulator:
 
     @staticmethod
     def _orient(pkt) -> tuple[str, int, str, int]:
-        """
-        Always return (client_ip, client_port, server_ip, server_port).
-        The client is the side that sent the SYN (higher ephemeral port);
-        the server has the well-known port (443, 80, etc.).
-        For UDP we use the same heuristic: lower port = server.
-        Never swap src/dst — direction matters for the rest of the pipeline.
-        """
         ip  = pkt["IP"]
         src_ip, dst_ip = ip.src, ip.dst
         if pkt.haslayer("TCP"):
@@ -258,13 +245,11 @@ class _FlowAccumulator:
         else:
             sp = dp = 0
 
-        # Heuristic: well-known ports (≤1024 or common TLS ports) = server side
         WELL_KNOWN = {80, 443, 8080, 8443, 993, 465, 587, 53, 22, 21, 25, 110, 143}
         if dp in WELL_KNOWN or (dp <= 1024 and sp > 1024):
-            return src_ip, sp, dst_ip, dp   # normal: src=client, dst=server
+            return src_ip, sp, dst_ip, dp
         if sp in WELL_KNOWN or (sp <= 1024 and dp > 1024):
-            return dst_ip, dp, src_ip, sp   # reversed packet (response): flip back
-        # Both ephemeral or both well-known — keep as-is
+            return dst_ip, dp, src_ip, sp
         return src_ip, sp, dst_ip, dp
 
     def _key(self, pkt) -> Optional[str]:
@@ -378,42 +363,96 @@ class _CaptureSession:
         self._iface      = ""
         self._bpf        = ""
         self._iface_cache: list[dict] = []
+        self._drain_done = threading.Event()
+        self._drain_done.set()
+        self._lock = threading.Lock()   # FIX: guard start/stop against race conditions
 
     def get_interfaces(self) -> list[dict]:
         if not self._iface_cache:
             self._iface_cache = _get_all_interfaces()
         return self._iface_cache
 
+    def is_actually_running(self) -> bool:
+        """
+        FIX: Return the REAL running state.
+        If the flag says running but the thread is dead, reset the flag and
+        return False.  This prevents stale True from causing spurious 409s
+        and from the live-monitor showing "running" after a crash.
+        """
+        with self._lock:
+            if not self.running:
+                return False
+            thread_alive = self._thread is not None and self._thread.is_alive()
+            if not thread_alive:
+                # Thread died without clearing flag — reset gracefully
+                logger.warning("Capture thread found dead with running=True — auto-resetting.")
+                self.running = False
+                self._drain_done.set()
+                self._update_status_row(is_running=0)
+            return self.running
+
     def start(self, npf_path: str, bpf_filter: str = "") -> None:
-        if self.running:
-            raise RuntimeError("Capture already running")
-        if not SCAPY_AVAILABLE:
-            raise RuntimeError("Scapy not installed. Run: pip install scapy\n"
-                               "Also install Npcap (https://npcap.com) on Windows.")
-        self._iface       = npf_path
-        self._bpf         = bpf_filter
-        self.running      = True
-        self.stats        = dict(packets_captured=0, tls_packets=0, bytes_seen=0, active_flows=0)
-        self._accumulator = _FlowAccumulator()
-        self._thread      = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
+        with self._lock:
+            # FIX: If thread died without clearing flag, allow restart
+            if self.running:
+                thread_alive = self._thread is not None and self._thread.is_alive()
+                if thread_alive:
+                    raise RuntimeError("Capture already running")
+                else:
+                    logger.warning("Stale running=True detected on start — resetting.")
+                    self.running = False
+
+            if not SCAPY_AVAILABLE:
+                raise RuntimeError(
+                    "Scapy not installed. Run: pip install scapy\n"
+                    "Also install Npcap (https://npcap.com) on Windows."
+                )
+            self._iface       = npf_path
+            self._bpf         = bpf_filter
+            self.running      = True
+            self._drain_done.set()
+            self.stats        = dict(packets_captured=0, tls_packets=0, bytes_seen=0, active_flows=0)
+            self._accumulator = _FlowAccumulator()
+            # Drain any leftover queued items from previous session
+            while not self._flow_q.empty():
+                try: self._flow_q.get_nowait()
+                except queue.Empty: break
+            while not self._event_q.empty():
+                try: self._event_q.get_nowait()
+                except queue.Empty: break
+
+            self._thread = threading.Thread(target=self._loop, daemon=True)
+            self._thread.start()
+
         self._push("status", {"running": True, "iface": npf_path})
         self._update_status_row(is_running=1, interface=npf_path, bpf_filter=bpf_filter)
 
     def stop(self) -> list[dict]:
-        self.running = False
+        """Stop capture, flush remaining flows into the queue, signal drain pending."""
+        with self._lock:
+            if not self.running:
+                return []
+            self.running = False
+
         flushed = self._accumulator.flush_all()
         for f in flushed:
             self._flow_q.put(f)
+        if not self._flow_q.empty():
+            self._drain_done.clear()
         self._push("status", {"running": False})
         self._update_status_row(is_running=0)
         return flushed
+
+    def wait_for_drain(self, timeout: float = 10.0) -> bool:
+        return self._drain_done.wait(timeout=timeout)
+
+    def signal_drain_done(self):
+        self._drain_done.set()
 
     def _loop(self):
         def handle(pkt):
             if not self.running:
                 return
-            # Skip non-IP packets early
             if not pkt.haslayer("IP"):
                 return
             if not (pkt.haslayer("TCP") or pkt.haslayer("UDP")):
@@ -444,7 +483,6 @@ class _CaptureSession:
                 self._push("stats", self.stats.copy())
                 self._update_stats_row()
 
-        # On Windows never pass BPF to Scapy — Npcap BPF is unreliable
         bpf_arg = None
         if self._bpf.strip() and not IS_WINDOWS:
             bpf_arg = self._bpf.strip()
@@ -459,8 +497,12 @@ class _CaptureSession:
             )
         except Exception as e:
             logger.error("Capture error on %s: %s", self._iface, e)
-            self.running = False
             self._push("error", {"message": str(e)})
+        finally:
+            # FIX: Always clear running flag when thread exits, regardless of cause
+            self.running = False
+            self._update_status_row(is_running=0)
+            logger.info("Capture thread exited cleanly.")
 
     def _push(self, event_type: str, data: dict):
         self._event_q.put({"type": event_type, "data": data, "ts": time.time()})
@@ -505,11 +547,12 @@ _session = _CaptureSession()
 # ── Score + store one completed flow ──────────────────────────────────────────
 
 def _ensure_alert_columns(conn: sqlite3.Connection) -> None:
-    """Add columns to alerts table that may be missing in older databases."""
     existing = {r[1] for r in conn.execute("PRAGMA table_info(alerts)").fetchall()}
     additions = [
         ("dst_port",  "INTEGER DEFAULT 0"),
         ("is_live",   "INTEGER DEFAULT 0"),
+        ("is_simulated", "INTEGER DEFAULT 0"),
+        ("attack_type",  "TEXT DEFAULT ''"),
     ]
     for col, definition in additions:
         if col not in existing:
@@ -518,13 +561,12 @@ def _ensure_alert_columns(conn: sqlite3.Connection) -> None:
                 conn.commit()
                 logger.info("Added missing column alerts.%s", col)
             except Exception:
-                pass  # Already exists or DB locked — safe to ignore
+                pass
 
 
 def _score_and_store(flow: dict, db_path: str = None) -> Optional[dict]:
     db_path = db_path or DB_PATH
 
-    # ── ML anomaly score ──────────────────────────────────────────────────────
     try:
         feats = _scoring_features(flow)
         X     = np.array([[feats[c] for c in SCORING_FEATURE_COLUMNS]])
@@ -539,10 +581,6 @@ def _score_and_store(flow: dict, db_path: str = None) -> Optional[dict]:
         anomaly = min(1.0, rst_r * 2.0 + 0.3)
         verdict = "ANOMALY" if anomaly >= 0.50 else "BENIGN"
 
-    if verdict == "BENIGN":
-        return None
-
-    # ── Module scores (all five) ───────────────────────────────────────────────
     m = _module_scores(flow)
     composite = _composite(anomaly, m["ja3_score"], m["beacon_score"], m["cert_score"], m["graph_score"])
     sev       = _severity(composite)
@@ -553,39 +591,16 @@ def _score_and_store(flow: dict, db_path: str = None) -> Optional[dict]:
     dst_port = int(flow.get("dst_port", 0))
     protocol = str(flow.get("protocol", "TCP"))
 
-    # ── Findings ──────────────────────────────────────────────────────────────
-    findings: list[str] = []
-    if composite >= 0.90:   findings.append("Extremely high anomaly score — likely malicious")
-    elif composite >= 0.75: findings.append("High anomaly score detected")
-    elif composite >= 0.60: findings.append("Moderate anomaly score detected")
-    else:                   findings.append("Low-level anomaly detected")
-    if m["ja3_score"]    >= 0.60: findings.append(f"Suspicious TLS fingerprint pattern (JA3={m['ja3_score']:.2f})")
-    if m["beacon_score"] >= 0.60: findings.append(f"Beaconing behavior detected (beacon={m['beacon_score']:.2f})")
-    if m["cert_score"]   >= 0.50: findings.append(f"Certificate anomaly proxy triggered (cert={m['cert_score']:.2f})")
-    findings_str = json.dumps(findings)
-
-    recommended = {
-        "CRITICAL": "Block immediately — isolate source host",
-        "HIGH":     "Investigate and consider blocking source IP",
-        "MEDIUM":   "Monitor closely — flag for review",
-        "LOW":      "Log and monitor",
-    }.get(sev, "Review manually")
-
-    now_ts    = datetime.now(timezone.utc).timestamp()
-    flow_id   = hashlib.sha256(f"{src_ip}:{src_port}-{dst_ip}:{dst_port}-{protocol}".encode()).hexdigest()[:32]
-    is_beacon = m["beacon_score"] >= 0.60 and sev in ("HIGH", "CRITICAL")
-    aid       = _beacon_alert_id(src_ip, dst_ip, dst_port) if is_beacon \
-                else _alert_id(src_ip, src_port, dst_ip, dst_port, protocol)
+    now_ts  = datetime.now(timezone.utc).timestamp()
+    dur_s   = flow.get("duration_ms", 0) / 1000.0
+    flow_id = hashlib.sha256(f"{src_ip}:{src_port}-{dst_ip}:{dst_port}-{protocol}".encode()).hexdigest()[:32]
 
     try:
         conn = sqlite3.connect(db_path, timeout=10)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
-        # Add missing columns to alerts table if they don't exist (one-time migration)
         _ensure_alert_columns(conn)
-        dur_s = flow.get("duration_ms", 0) / 1000.0
 
-        # ── flows table ───────────────────────────────────────────────────────
         conn.execute("""
             INSERT OR IGNORE INTO flows (
                 flow_id, src_ip, dst_ip, src_port, dst_port, protocol,
@@ -611,8 +626,41 @@ def _score_and_store(flow: dict, db_path: str = None) -> Optional[dict]:
             round(m["cert_score"], 4), round(m["graph_score"], 4),
             "ACTIVE", verdict, sev, "live", 1, now_ts,
         ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error("DB flow write failed: %s", e)
 
-        # ── alerts table ──────────────────────────────────────────────────────
+    if verdict == "BENIGN":
+        return None
+
+    findings: list[str] = []
+    if composite >= 0.90:   findings.append("Extremely high anomaly score — likely malicious")
+    elif composite >= 0.75: findings.append("High anomaly score detected")
+    elif composite >= 0.60: findings.append("Moderate anomaly score detected")
+    else:                   findings.append("Low-level anomaly detected")
+    if m["ja3_score"]    >= 0.60: findings.append(f"Suspicious TLS fingerprint pattern (JA3={m['ja3_score']:.2f})")
+    if m["beacon_score"] >= 0.60: findings.append(f"Beaconing behavior detected (beacon={m['beacon_score']:.2f})")
+    if m["cert_score"]   >= 0.50: findings.append(f"Certificate anomaly proxy triggered (cert={m['cert_score']:.2f})")
+    findings_str = json.dumps(findings)
+
+    recommended = {
+        "CRITICAL": "Block immediately — isolate source host",
+        "HIGH":     "Investigate and consider blocking source IP",
+        "MEDIUM":   "Monitor closely — flag for review",
+        "LOW":      "Log and monitor",
+    }.get(sev, "Review manually")
+
+    is_beacon = m["beacon_score"] >= 0.60 and sev in ("HIGH", "CRITICAL")
+    aid       = _beacon_alert_id(src_ip, dst_ip, dst_port) if is_beacon \
+                else _alert_id(src_ip, src_port, dst_ip, dst_port, protocol)
+
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        _ensure_alert_columns(conn)
+
         existing = conn.execute("SELECT alert_id FROM alerts WHERE alert_id=?", (aid,)).fetchone()
         if existing and not is_beacon:
             conn.execute("""
@@ -646,7 +694,7 @@ def _score_and_store(flow: dict, db_path: str = None) -> Optional[dict]:
         conn.commit(); conn.close()
 
     except Exception as e:
-        logger.error("DB write failed: %s", e)
+        logger.error("DB alert write failed: %s", e)
         return None
 
     result = {
@@ -665,9 +713,7 @@ def _score_and_store(flow: dict, db_path: str = None) -> Optional[dict]:
         "is_beacon": int(is_beacon),
     }
 
-    # Mirror ALL anomaly alerts to Supabase; Groq analysis for HIGH/CRITICAL only
     def _bg():
-        # Always push to Supabase so alert_id is recorded for every detection
         try:
             from src.integrations.supabase_client import mirror_alert_any_severity
             mirror_alert_any_severity(result)
@@ -677,7 +723,6 @@ def _score_and_store(flow: dict, db_path: str = None) -> Optional[dict]:
                 mirror_alert(result)
             except Exception:
                 pass
-        # AI explanation only for serious alerts
         if sev in ("HIGH", "CRITICAL"):
             try:
                 from src.integrations.groq_client import analyse_and_store
@@ -692,22 +737,42 @@ def _score_and_store(flow: dict, db_path: str = None) -> Optional[dict]:
 # ── Background processor ──────────────────────────────────────────────────────
 
 async def _processor(db_path: str):
-    while _session.running:
-        for flow in _session.drain_flows():
-            try:
-                alert = _score_and_store(flow, db_path)
-                if alert:
-                    logger.info("LIVE %s  %s:%d→%s:%d  composite=%.3f  "
-                                "anomaly=%.3f ja3=%.3f beacon=%.3f cert=%.3f",
-                                alert["severity"],
-                                alert["src_ip"], alert["src_port"],
-                                alert["dst_ip"], alert["dst_port"],
-                                alert["composite_score"],
-                                alert["anomaly_score"], alert["ja3_score"],
-                                alert["beacon_score"], alert["cert_score"])
-            except Exception as e:
-                logger.warning("Flow scoring error: %s", e)
-        await asyncio.sleep(0.5)
+    """Score flows while capture is running, then drain remaining on stop."""
+    try:
+        while _session.running:
+            for flow in _session.drain_flows():
+                try:
+                    alert = _score_and_store(flow, db_path)
+                    if alert:
+                        logger.info(
+                            "LIVE %s  %s:%d→%s:%d  composite=%.3f",
+                            alert["severity"],
+                            alert["src_ip"], alert["src_port"],
+                            alert["dst_ip"], alert["dst_port"],
+                            alert["composite_score"],
+                        )
+                except Exception as e:
+                    logger.warning("Flow scoring error: %s", e)
+            await asyncio.sleep(0.5)
+
+        logger.info("Capture stopped — draining remaining queued flows...")
+        drained_alerts = 0
+        while True:
+            flows = _session.drain_flows()
+            if not flows:
+                break
+            for flow in flows:
+                try:
+                    alert = _score_and_store(flow, db_path)
+                    if alert:
+                        drained_alerts += 1
+                except Exception as e:
+                    logger.warning("Post-stop flow scoring error: %s", e)
+            await asyncio.sleep(0.1)
+
+        logger.info("Drain complete — %d alert(s) generated from post-stop flows.", drained_alerts)
+    finally:
+        _session.signal_drain_done()
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -725,7 +790,8 @@ def list_interfaces() -> dict:
 
 @router.post("/start")
 def start_capture(req: CaptureStartRequest, background_tasks: BackgroundTasks) -> dict:
-    if _session.running:
+    # FIX: Use is_actually_running() which auto-resets stale state
+    if _session.is_actually_running():
         raise HTTPException(status_code=409, detail="Capture already running")
     _load_model()
     try:
@@ -738,15 +804,43 @@ def start_capture(req: CaptureStartRequest, background_tasks: BackgroundTasks) -
 
 @router.post("/stop")
 def stop_capture() -> dict:
-    if not _session.running:
-        raise HTTPException(status_code=409, detail="No capture running")
+    # FIX: Idempotent — return 200 instead of 409 when nothing is running
+    if not _session.is_actually_running():
+        return {"stopped": False, "reason": "No capture was running", "flows_flushed": 0, "drain_complete": True}
+
     flushed = _session.stop()
-    return {"stopped": True, "flows_flushed": len(flushed)}
+    drained = _session.wait_for_drain(timeout=12.0)
+
+    return {
+        "stopped": True,
+        "flows_flushed": len(flushed),
+        "drain_complete": drained,
+    }
+
+
+@router.post("/force-reset")
+def force_reset_capture() -> dict:
+    """
+    Emergency reset endpoint — clears running state regardless of thread status.
+    Use when the dashboard shows 'running' but no actual capture is happening.
+    """
+    was_running = _session.running
+    _session.running = False
+    _session._drain_done.set()
+    _session._update_status_row(is_running=0)
+    logger.warning("Force-reset called — was_running=%s", was_running)
+    return {"reset": True, "was_running": was_running}
 
 
 @router.get("/status")
 def capture_status() -> dict:
-    return {"running": _session.running, "stats": _session.stats}
+    # FIX: Use is_actually_running() so stale True values are corrected
+    actually_running = _session.is_actually_running()
+    return {
+        "running": actually_running,
+        "stats": _session.stats,
+        "drain_pending": not _session._drain_done.is_set(),
+    }
 
 
 @router.get("/stream")
@@ -775,6 +869,15 @@ def recent_live_alerts(
         rows      = conn.execute(
             f"SELECT * FROM alerts {where} ORDER BY {order_col} DESC LIMIT ?", (limit,)
         ).fetchall()
-        return {"alerts": [dict(r) for r in rows]}
+        import json as _json
+        result = []
+        for row in rows:
+            d = dict(row)
+            findings = d.get("findings", "[]")
+            if isinstance(findings, str):
+                try:   d["findings"] = _json.loads(findings)
+                except: d["findings"] = [findings] if findings else []
+            result.append(d)
+        return {"alerts": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

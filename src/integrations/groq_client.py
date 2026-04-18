@@ -2,17 +2,12 @@
 src/integrations/groq_client.py
 Groq AI threat analysis — triggered for HIGH and CRITICAL alerts.
 
-Setup:
-    pip install groq python-dotenv
-
-.env (project root):
-    GROQ_API_KEY=your-key
-
-Fixes vs previous version:
-  - _store_in_sqlite calls init_db first so the table always exists
-  - ALTER TABLE failures are fully caught and logged, never crash the thread
-  - Prompt includes src_port which was missing
-  - analyse_and_store accepts is_live flag so Supabase patch works correctly
+Fixes in this version:
+  - Updated models: llama3-70b-8192 and llama3-8b-8192 are DECOMMISSIONED.
+    Primary model is now llama-3.3-70b-versatile, fallback is llama-3.1-8b-instant.
+  - Handles 'model_decommissioned' error code explicitly — immediately falls back
+    instead of retrying the dead model.
+  - _client is reset on decommission errors so next call re-initialises cleanly.
 """
 
 from __future__ import annotations
@@ -32,10 +27,10 @@ try:
 except ImportError:
     pass
 
-GROQ_API_KEY        = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL          = "llama3-70b-8192"
-GROQ_FALLBACK       = "llama3-8b-8192"
-TRIGGER_SEVERITIES  = {"HIGH", "CRITICAL"}
+GROQ_API_KEY       = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL         = "llama-3.3-70b-versatile"    # replaces decommissioned llama3-70b-8192
+GROQ_FALLBACK      = "llama-3.1-8b-instant"        # replaces decommissioned llama3-8b-8192
+TRIGGER_SEVERITIES = {"HIGH", "CRITICAL"}
 
 _client = None
 
@@ -99,6 +94,8 @@ def analyse_alert(alert: dict, retries: int = 2) -> Optional[dict]:
     Run Groq LLM on one alert dict.
     Returns dict with summary/explanation/action/threat_type/confidence, or None.
     """
+    global _client
+
     if alert.get("severity") not in TRIGGER_SEVERITIES:
         return None
     if not is_configured():
@@ -131,13 +128,31 @@ def analyse_alert(alert: dict, retries: int = 2) -> Optional[dict]:
                 time.sleep(1)
 
         except Exception as e:
-            err = str(e).lower()
-            if "rate_limit" in err and model == GROQ_MODEL:
+            err_str  = str(e)
+            err_low  = err_str.lower()
+
+            # Model decommissioned — immediately switch, don't retry same model
+            if "model_decommissioned" in err_low or "decommissioned" in err_low:
+                logger.warning(
+                    "Model %s decommissioned — switching to fallback %s", model, GROQ_FALLBACK
+                )
+                _client = None   # force re-init on next call
+                if model != GROQ_FALLBACK:
+                    model = GROQ_FALLBACK
+                    continue     # retry immediately with fallback
+                else:
+                    logger.error("Fallback model also decommissioned — giving up")
+                    return None
+
+            elif "rate_limit" in err_low and model == GROQ_MODEL:
                 logger.warning("Rate limit hit — falling back to %s", GROQ_FALLBACK)
                 model = GROQ_FALLBACK
                 time.sleep(2)
+
             elif attempt < retries:
+                logger.warning("Groq attempt %d failed: %s", attempt + 1, e)
                 time.sleep(1)
+
             else:
                 logger.error("Groq failed after %d attempts: %s", retries + 1, e)
                 return None
@@ -168,13 +183,8 @@ def analyse_and_store(alert: dict, db_path: str = "data/spectra.db") -> Optional
 
 
 def _store_in_sqlite(alert_id: str, groq_data: dict, db_path: str) -> None:
-    """
-    Write Groq results back to the alerts row.
-    Ensures the table and columns exist before writing — never crashes
-    even if called before the schema has been created.
-    """
+    """Write Groq results back to the alerts row."""
     try:
-        # Ensure DB + schema exist
         from init_db import init_db
         init_db(db_path)
     except Exception as e:
@@ -182,7 +192,6 @@ def _store_in_sqlite(alert_id: str, groq_data: dict, db_path: str) -> None:
 
     try:
         conn = sqlite3.connect(db_path, timeout=10)
-        # Add groq columns if somehow still missing (old DB)
         existing = {r[1] for r in conn.execute("PRAGMA table_info(alerts)").fetchall()}
         for col in ("groq_summary", "groq_explanation", "groq_action",
                     "groq_threat_type", "groq_confidence"):
@@ -190,7 +199,7 @@ def _store_in_sqlite(alert_id: str, groq_data: dict, db_path: str) -> None:
                 try:
                     conn.execute(f"ALTER TABLE alerts ADD COLUMN {col} TEXT DEFAULT ''")
                 except sqlite3.OperationalError:
-                    pass  # already exists, race condition
+                    pass
 
         conn.execute("""
             UPDATE alerts SET
@@ -218,7 +227,8 @@ def batch_analyse_unprocessed(
 ) -> int:
     """
     Backfill: analyse HIGH/CRITICAL alerts that have no Groq summary yet.
-    Run manually:  python -c "from src.integrations.groq_client import batch_analyse_unprocessed; batch_analyse_unprocessed()"
+    Run manually:
+        python -c "from src.integrations.groq_client import batch_analyse_unprocessed; batch_analyse_unprocessed()"
     """
     if not is_configured():
         print("GROQ_API_KEY not set in .env")
@@ -227,9 +237,8 @@ def batch_analyse_unprocessed(
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
 
-    # Ensure groq columns
     existing = {r[1] for r in conn.execute("PRAGMA table_info(alerts)").fetchall()}
-    for col in ("groq_summary","groq_explanation","groq_action","groq_threat_type","groq_confidence"):
+    for col in ("groq_summary", "groq_explanation", "groq_action", "groq_threat_type", "groq_confidence"):
         if col not in existing:
             try:
                 conn.execute(f"ALTER TABLE alerts ADD COLUMN {col} TEXT DEFAULT ''")
