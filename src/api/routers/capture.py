@@ -3,20 +3,14 @@ src/api/routers/capture.py
 Live capture router — start/stop real-time packet capture and stream results.
 
 Fixes in this version:
-  - CRITICAL FIX: Flushed flows on stop() are now scored synchronously in a
-    dedicated drain thread so analysis always appears after capture stops.
-  - _processor now drains remaining flows after running=False (was exiting early).
-  - /stop endpoint waits for drain to complete and returns scored alert count.
-  - /capture/recent-alerts polls include a short settling delay so DB writes
-    are visible immediately.
-  - src_ip/src_port always = the CLIENT side (higher ephemeral port),
-    dst_ip/dst_port always = the SERVER side (lower well-known port).
-  - All five module scores written to both flows and alerts tables.
-  - composite_score capped correctly via weighted formula.
-  - Windows: BPF filter not passed to Scapy; Python-level port filtering used.
-  - Interface list returns {friendly, npf_path} dicts with Wi-Fi sorted first.
-  - Flow timeout 15 s / early-emit after 10 packets for fast feedback.
-  - Supabase + Groq run in one background thread for HIGH/CRITICAL alerts.
+  - FIX 409 on start: _session.running is force-reset to False + thread joined
+    if the sniff thread died without clearing the flag.  A /start call now
+    always succeeds when no live capture is actually running.
+  - FIX 409 on stop: /stop is idempotent — returns 200 with stopped=False when
+    no capture was running rather than raising 409.
+  - FIX live-monitor "always running": /status reflects the ACTUAL thread state,
+    not just the boolean flag, so stale True values are corrected automatically.
+  - All previous fixes retained (drain thread, WAL mode, Windows BPF, etc.).
 """
 
 from __future__ import annotations
@@ -369,39 +363,80 @@ class _CaptureSession:
         self._iface      = ""
         self._bpf        = ""
         self._iface_cache: list[dict] = []
-        # Tracks whether flushed flows have been fully scored after stop
         self._drain_done = threading.Event()
-        self._drain_done.set()  # initially "done" (nothing to drain)
+        self._drain_done.set()
+        self._lock = threading.Lock()   # FIX: guard start/stop against race conditions
 
     def get_interfaces(self) -> list[dict]:
         if not self._iface_cache:
             self._iface_cache = _get_all_interfaces()
         return self._iface_cache
 
+    def is_actually_running(self) -> bool:
+        """
+        FIX: Return the REAL running state.
+        If the flag says running but the thread is dead, reset the flag and
+        return False.  This prevents stale True from causing spurious 409s
+        and from the live-monitor showing "running" after a crash.
+        """
+        with self._lock:
+            if not self.running:
+                return False
+            thread_alive = self._thread is not None and self._thread.is_alive()
+            if not thread_alive:
+                # Thread died without clearing flag — reset gracefully
+                logger.warning("Capture thread found dead with running=True — auto-resetting.")
+                self.running = False
+                self._drain_done.set()
+                self._update_status_row(is_running=0)
+            return self.running
+
     def start(self, npf_path: str, bpf_filter: str = "") -> None:
-        if self.running:
-            raise RuntimeError("Capture already running")
-        if not SCAPY_AVAILABLE:
-            raise RuntimeError("Scapy not installed. Run: pip install scapy\n"
-                               "Also install Npcap (https://npcap.com) on Windows.")
-        self._iface       = npf_path
-        self._bpf         = bpf_filter
-        self.running      = True
-        self._drain_done.set()
-        self.stats        = dict(packets_captured=0, tls_packets=0, bytes_seen=0, active_flows=0)
-        self._accumulator = _FlowAccumulator()
-        self._thread      = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
+        with self._lock:
+            # FIX: If thread died without clearing flag, allow restart
+            if self.running:
+                thread_alive = self._thread is not None and self._thread.is_alive()
+                if thread_alive:
+                    raise RuntimeError("Capture already running")
+                else:
+                    logger.warning("Stale running=True detected on start — resetting.")
+                    self.running = False
+
+            if not SCAPY_AVAILABLE:
+                raise RuntimeError(
+                    "Scapy not installed. Run: pip install scapy\n"
+                    "Also install Npcap (https://npcap.com) on Windows."
+                )
+            self._iface       = npf_path
+            self._bpf         = bpf_filter
+            self.running      = True
+            self._drain_done.set()
+            self.stats        = dict(packets_captured=0, tls_packets=0, bytes_seen=0, active_flows=0)
+            self._accumulator = _FlowAccumulator()
+            # Drain any leftover queued items from previous session
+            while not self._flow_q.empty():
+                try: self._flow_q.get_nowait()
+                except queue.Empty: break
+            while not self._event_q.empty():
+                try: self._event_q.get_nowait()
+                except queue.Empty: break
+
+            self._thread = threading.Thread(target=self._loop, daemon=True)
+            self._thread.start()
+
         self._push("status", {"running": True, "iface": npf_path})
         self._update_status_row(is_running=1, interface=npf_path, bpf_filter=bpf_filter)
 
     def stop(self) -> list[dict]:
         """Stop capture, flush remaining flows into the queue, signal drain pending."""
-        self.running = False
+        with self._lock:
+            if not self.running:
+                return []
+            self.running = False
+
         flushed = self._accumulator.flush_all()
         for f in flushed:
             self._flow_q.put(f)
-        # Signal that drain is not yet complete (processor will set it when done)
         if not self._flow_q.empty():
             self._drain_done.clear()
         self._push("status", {"running": False})
@@ -409,7 +444,6 @@ class _CaptureSession:
         return flushed
 
     def wait_for_drain(self, timeout: float = 10.0) -> bool:
-        """Block until all flushed flows have been scored, or timeout."""
         return self._drain_done.wait(timeout=timeout)
 
     def signal_drain_done(self):
@@ -463,8 +497,12 @@ class _CaptureSession:
             )
         except Exception as e:
             logger.error("Capture error on %s: %s", self._iface, e)
-            self.running = False
             self._push("error", {"message": str(e)})
+        finally:
+            # FIX: Always clear running flag when thread exits, regardless of cause
+            self.running = False
+            self._update_status_row(is_running=0)
+            logger.info("Capture thread exited cleanly.")
 
     def _push(self, event_type: str, data: dict):
         self._event_q.put({"type": event_type, "data": data, "ts": time.time()})
@@ -509,11 +547,12 @@ _session = _CaptureSession()
 # ── Score + store one completed flow ──────────────────────────────────────────
 
 def _ensure_alert_columns(conn: sqlite3.Connection) -> None:
-    """Add columns to alerts table that may be missing in older databases."""
     existing = {r[1] for r in conn.execute("PRAGMA table_info(alerts)").fetchall()}
     additions = [
         ("dst_port",  "INTEGER DEFAULT 0"),
         ("is_live",   "INTEGER DEFAULT 0"),
+        ("is_simulated", "INTEGER DEFAULT 0"),
+        ("attack_type",  "TEXT DEFAULT ''"),
     ]
     for col, definition in additions:
         if col not in existing:
@@ -528,7 +567,6 @@ def _ensure_alert_columns(conn: sqlite3.Connection) -> None:
 def _score_and_store(flow: dict, db_path: str = None) -> Optional[dict]:
     db_path = db_path or DB_PATH
 
-    # ── ML anomaly score ──────────────────────────────────────────────────────
     try:
         feats = _scoring_features(flow)
         X     = np.array([[feats[c] for c in SCORING_FEATURE_COLUMNS]])
@@ -543,8 +581,6 @@ def _score_and_store(flow: dict, db_path: str = None) -> Optional[dict]:
         anomaly = min(1.0, rst_r * 2.0 + 0.3)
         verdict = "ANOMALY" if anomaly >= 0.50 else "BENIGN"
 
-    # ── ALWAYS store the flow regardless of verdict ───────────────────────────
-    # (so live flows show up in the flows table even if BENIGN)
     m = _module_scores(flow)
     composite = _composite(anomaly, m["ja3_score"], m["beacon_score"], m["cert_score"], m["graph_score"])
     sev       = _severity(composite)
@@ -565,7 +601,6 @@ def _score_and_store(flow: dict, db_path: str = None) -> Optional[dict]:
         conn.execute("PRAGMA journal_mode=WAL")
         _ensure_alert_columns(conn)
 
-        # ── flows table — always write ────────────────────────────────────────
         conn.execute("""
             INSERT OR IGNORE INTO flows (
                 flow_id, src_ip, dst_ip, src_port, dst_port, protocol,
@@ -596,11 +631,9 @@ def _score_and_store(flow: dict, db_path: str = None) -> Optional[dict]:
     except Exception as e:
         logger.error("DB flow write failed: %s", e)
 
-    # Only generate an alert for ANOMALY flows
     if verdict == "BENIGN":
         return None
 
-    # ── Findings ──────────────────────────────────────────────────────────────
     findings: list[str] = []
     if composite >= 0.90:   findings.append("Extremely high anomaly score — likely malicious")
     elif composite >= 0.75: findings.append("High anomaly score detected")
@@ -628,7 +661,6 @@ def _score_and_store(flow: dict, db_path: str = None) -> Optional[dict]:
         conn.execute("PRAGMA journal_mode=WAL")
         _ensure_alert_columns(conn)
 
-        # ── alerts table ──────────────────────────────────────────────────────
         existing = conn.execute("SELECT alert_id FROM alerts WHERE alert_id=?", (aid,)).fetchone()
         if existing and not is_beacon:
             conn.execute("""
@@ -681,7 +713,6 @@ def _score_and_store(flow: dict, db_path: str = None) -> Optional[dict]:
         "is_beacon": int(is_beacon),
     }
 
-    # Mirror to Supabase; Groq analysis for HIGH/CRITICAL only
     def _bg():
         try:
             from src.integrations.supabase_client import mirror_alert_any_severity
@@ -704,8 +735,6 @@ def _score_and_store(flow: dict, db_path: str = None) -> Optional[dict]:
 
 
 # ── Background processor ──────────────────────────────────────────────────────
-# FIX: Processor now drains ALL remaining queued flows even after running=False,
-#      then signals drain_done so /stop can report accurate alert counts.
 
 async def _processor(db_path: str):
     """Score flows while capture is running, then drain remaining on stop."""
@@ -726,7 +755,6 @@ async def _processor(db_path: str):
                     logger.warning("Flow scoring error: %s", e)
             await asyncio.sleep(0.5)
 
-        # ── Drain remaining queued flows after capture stops ──────────────────
         logger.info("Capture stopped — draining remaining queued flows...")
         drained_alerts = 0
         while True:
@@ -738,20 +766,12 @@ async def _processor(db_path: str):
                     alert = _score_and_store(flow, db_path)
                     if alert:
                         drained_alerts += 1
-                        logger.info(
-                            "POST-STOP %s  %s:%d→%s:%d  composite=%.3f",
-                            alert["severity"],
-                            alert["src_ip"], alert["src_port"],
-                            alert["dst_ip"], alert["dst_port"],
-                            alert["composite_score"],
-                        )
                 except Exception as e:
                     logger.warning("Post-stop flow scoring error: %s", e)
             await asyncio.sleep(0.1)
 
         logger.info("Drain complete — %d alert(s) generated from post-stop flows.", drained_alerts)
     finally:
-        # Always signal done, even if an exception occurred
         _session.signal_drain_done()
 
 
@@ -770,7 +790,8 @@ def list_interfaces() -> dict:
 
 @router.post("/start")
 def start_capture(req: CaptureStartRequest, background_tasks: BackgroundTasks) -> dict:
-    if _session.running:
+    # FIX: Use is_actually_running() which auto-resets stale state
+    if _session.is_actually_running():
         raise HTTPException(status_code=409, detail="Capture already running")
     _load_model()
     try:
@@ -783,17 +804,11 @@ def start_capture(req: CaptureStartRequest, background_tasks: BackgroundTasks) -
 
 @router.post("/stop")
 def stop_capture() -> dict:
-    """
-    Stop live capture, flush and SCORE all remaining flows synchronously,
-    then return. The response includes flows_flushed and alerts_generated.
-    """
-    if not _session.running:
-        raise HTTPException(status_code=409, detail="No capture running")
+    # FIX: Idempotent — return 200 instead of 409 when nothing is running
+    if not _session.is_actually_running():
+        return {"stopped": False, "reason": "No capture was running", "flows_flushed": 0, "drain_complete": True}
 
     flushed = _session.stop()
-
-    # Wait up to 12 s for the background processor to drain & score all flows.
-    # This ensures the DB is populated before the dashboard polls for alerts.
     drained = _session.wait_for_drain(timeout=12.0)
 
     return {
@@ -803,10 +818,26 @@ def stop_capture() -> dict:
     }
 
 
+@router.post("/force-reset")
+def force_reset_capture() -> dict:
+    """
+    Emergency reset endpoint — clears running state regardless of thread status.
+    Use when the dashboard shows 'running' but no actual capture is happening.
+    """
+    was_running = _session.running
+    _session.running = False
+    _session._drain_done.set()
+    _session._update_status_row(is_running=0)
+    logger.warning("Force-reset called — was_running=%s", was_running)
+    return {"reset": True, "was_running": was_running}
+
+
 @router.get("/status")
 def capture_status() -> dict:
+    # FIX: Use is_actually_running() so stale True values are corrected
+    actually_running = _session.is_actually_running()
     return {
-        "running": _session.running,
+        "running": actually_running,
         "stats": _session.stats,
         "drain_pending": not _session._drain_done.is_set(),
     }
