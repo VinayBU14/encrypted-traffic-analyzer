@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
@@ -23,7 +22,6 @@ def _fmt_bytes(b: int) -> str:
     return f"{b/1024**2:.2f} MB"
 
 def _threat_level(stats: dict[str,int]) -> tuple[str,str,str]:
-    
     if stats.get("CRITICAL", 0) > 0:
         return "CRITICAL", "#ef4444", "Active critical threats detected"
     if stats.get("HIGH", 0) > 0:
@@ -34,13 +32,51 @@ def _threat_level(stats: dict[str,int]) -> tuple[str,str,str]:
         return "LOW", "#3b82f6", "Low-risk anomalies detected"
     return "CLEAN", "#22c55e", "No active threats"
 
-def render() -> None:
-    
+def _is_capture_running() -> bool:
+    """Check if live capture is active by querying the capture status endpoint."""
     try:
-        stats      = api_client.get_alert_stats()
-        alerts     = api_client.get_alerts(limit=200)
-        flows      = api_client.get_flows(limit=200)
-        high_risk  = api_client.get_high_risk_nodes(threshold=0.30)
+        import requests
+        r = requests.get("http://localhost:8000/capture/status", timeout=2)
+        return r.json().get("running", False)
+    except Exception:
+        return False
+
+def render() -> None:
+
+    # ── Source toggle ─────────────────────────────────────────────────────────
+    capture_running = _is_capture_running()
+
+    col_left, col_right = st.columns([3, 1])
+    with col_right:
+        source_options = ["All Data", "Live Only", "PCAP Only"]
+        # Default to "Live Only" when capture is active
+        default_idx = 1 if capture_running else 0
+        if "ov_source" not in st.session_state:
+            st.session_state["ov_source"] = source_options[default_idx]
+        source_label = st.selectbox(
+            "Data source",
+            source_options,
+            index=source_options.index(st.session_state.get("ov_source", source_options[default_idx])),
+            key="ov_source_sel",
+            label_visibility="collapsed",
+        )
+        st.session_state["ov_source"] = source_label
+
+    source_param = {"Live Only": "live", "PCAP Only": "pcap"}.get(source_label, None)
+
+    if capture_running and source_label == "Live Only":
+        st.markdown(
+            '<div style="background:#0d2137;border:1px solid #1f6feb33;border-radius:6px;'
+            'padding:6px 12px;font-size:12px;color:#58a6ff;margin-bottom:8px">'
+            '⊙ Live capture active — showing live-captured flows and alerts</div>',
+            unsafe_allow_html=True,
+        )
+
+    try:
+        stats     = api_client.get_alert_stats(source=source_param)
+        alerts    = api_client.get_alerts(limit=200, source=source_param)
+        flows     = api_client.get_flows(limit=200, source=source_param)
+        high_risk = api_client.get_high_risk_nodes(threshold=0.30)
     except ConnectionError as exc:
         st.markdown(f"""
         <div style="background:#1a0505;border:1px solid #7f1d1d;border-radius:14px;
@@ -66,8 +102,15 @@ def render() -> None:
     total_bytes    = sum(int(f.get("bytes_total", 0)) for f in flows)
     malicious_nodes= sum(1 for n in high_risk if n.get("is_malicious"))
     unique_ips     = len({f.get("src_ip") for f in flows if f.get("src_ip")})
+    live_alert_cnt = sum(1 for a in alerts if a.get("is_live"))
 
-    
+    # Threat level banner
+    source_badge = ""
+    if source_label == "Live Only":
+        source_badge = f' <span style="font-size:0.6rem;background:#0d2137;color:#58a6ff;padding:3px 8px;border-radius:4px;vertical-align:middle">⚡ LIVE</span>'
+    elif source_label == "PCAP Only":
+        source_badge = f' <span style="font-size:0.6rem;background:#1c2128;color:#8b949e;padding:3px 8px;border-radius:4px;vertical-align:middle">📁 PCAP</span>'
+
     st.markdown(f"""
     <div style="background:linear-gradient(135deg,{tl_bg} 0%,#080c14 100%);
                 border:1px solid {tl_border};border-radius:16px;
@@ -83,7 +126,7 @@ def render() -> None:
                             margin-bottom:8px">System Threat Level</div>
                 <div style="font-family:'Syne',sans-serif;font-size:3rem;font-weight:800;
                             color:{tl_color};letter-spacing:-0.02em;line-height:1">
-                    {threat_level}</div>
+                    {threat_level}{source_badge}</div>
                 <div style="font-family:'Syne',sans-serif;font-size:0.88rem;
                             color:#475569;margin-top:8px">{tl_desc}</div>
             </div>
@@ -97,11 +140,12 @@ def render() -> None:
                 <div style="font-family:'Syne',sans-serif;font-size:0.7rem;font-weight:700;
                             color:#334155;text-transform:uppercase;letter-spacing:0.1em">
                     total alerts</div>
+                {f'<div style="font-family:monospace;font-size:0.65rem;color:#58a6ff;margin-top:4px">{live_alert_cnt} live</div>' if live_alert_cnt > 0 else ""}
             </div>
         </div>
     </div>""", unsafe_allow_html=True)
 
-    
+    # Severity pills
     sev_cols = st.columns(5)
     for col, sev in zip(sev_cols, ["CRITICAL","HIGH","MEDIUM","LOW","CLEAN"]):
         count  = stats.get(sev, 0)
@@ -127,7 +171,6 @@ def render() -> None:
 
     st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 
-    
     left_col, right_col = st.columns([1, 1])
 
     with left_col:
@@ -166,7 +209,6 @@ def render() -> None:
                        letter-spacing:0.1em;margin-bottom:10px">Score Distribution</div>""",
                     unsafe_allow_html=True)
 
-        
         buckets = {"0.9–1.0":0,"0.7–0.9":0,"0.5–0.7":0,"0.3–0.5":0,"0.0–0.3":0}
         bucket_colors = {"0.9–1.0":"#ef4444","0.7–0.9":"#f97316","0.5–0.7":"#eab308",
                          "0.3–0.5":"#3b82f6","0.0–0.3":"#22c55e"}
@@ -178,7 +220,7 @@ def render() -> None:
             elif s >= 0.3: buckets["0.3–0.5"] += 1
             else:          buckets["0.0–0.3"] += 1
 
-        max_b = max(buckets.values()) if buckets.values() else 1
+        max_b = max(buckets.values()) if any(buckets.values()) else 1
         dist_html = '<div style="background:#0d1117;border:1px solid #1e2a3a;border-radius:12px;padding:16px 20px">'
         for label, count in buckets.items():
             bc = bucket_colors[label]
@@ -200,7 +242,6 @@ def render() -> None:
 
     st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 
-    
     feed_col, method_col = st.columns([3, 2])
 
     with feed_col:
@@ -217,7 +258,7 @@ def render() -> None:
             st.markdown("""<div style="background:#0d1117;border:1px solid #1e2a3a;
                            border-radius:12px;padding:24px;text-align:center">
                 <div style="font-family:'Syne',sans-serif;color:#1e2a3a;font-size:0.85rem">
-                    No alerts yet — run the pipeline to generate data</div>
+                    No alerts — start live capture or run the pipeline</div>
             </div>""", unsafe_allow_html=True)
         else:
             feed_html = '<div style="background:#0d1117;border:1px solid #1e2a3a;border-radius:12px;overflow:hidden">'
@@ -226,8 +267,13 @@ def render() -> None:
                 sc    = float(a.get("composite_score", 0))
                 c     = _SEV_COLOR.get(sev, "#475569")
                 src   = a.get("src_ip","—")
+                sport = a.get("src_port", "")
+                dport = a.get("dst_port", "")
                 dom   = a.get("dst_domain","") or a.get("dst_ip","") or "—"
+                dst_label = f"{dom}:{dport}" if dport else dom
                 ts    = _fmt_ts(a.get("timestamp", 0))
+                is_live_flag = a.get("is_live", 0)
+                live_dot = ' <span style="color:#3fb950;font-size:9px">⚡</span>' if is_live_flag else ""
                 bg_row = "#0a0f18" if i % 2 == 0 else "#0d1117"
                 feed_html += f"""
                 <div style="display:flex;align-items:center;gap:12px;padding:10px 16px;
@@ -239,13 +285,13 @@ def render() -> None:
                             <span style="font-family:'Syne',sans-serif;font-size:0.72rem;
                                          font-weight:700;color:{c}">{sev}</span>
                             <span style="font-family:'JetBrains Mono',monospace;
-                                         font-size:0.72rem;color:#334155">{src}</span>
+                                         font-size:0.72rem;color:#334155">{src}{live_dot}</span>
                             <span style="font-family:'JetBrains Mono',monospace;
                                          font-size:0.68rem;color:#1e2a3a">→</span>
                             <span style="font-family:'JetBrains Mono',monospace;
                                          font-size:0.72rem;color:#334155;
                                          white-space:nowrap;overflow:hidden;
-                                         text-overflow:ellipsis;max-width:180px">{dom}</span>
+                                         text-overflow:ellipsis;max-width:180px">{dst_label}</span>
                         </div>
                     </div>
                     <div style="font-family:'JetBrains Mono',monospace;font-size:0.72rem;
@@ -256,7 +302,6 @@ def render() -> None:
             feed_html += "</div>"
             st.markdown(feed_html, unsafe_allow_html=True)
 
-            
             st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
             if st.button("View all alerts  →", key="ov_to_monitor", use_container_width=False):
                 state.set_active_page("Live Monitor")
@@ -268,7 +313,6 @@ def render() -> None:
                        letter-spacing:0.1em;margin-bottom:10px">Detection Modules</div>""",
                     unsafe_allow_html=True)
 
-        
         modules = [
             ("JA3 Fingerprint",  "ja3_score",    "#8b5cf6", "TLS client fingerprinting"),
             ("Beacon Detection", "beacon_score",  "#06b6d4", "C2 periodicity analysis"),
@@ -302,7 +346,6 @@ def render() -> None:
         mod_html += "</div>"
         st.markdown(mod_html, unsafe_allow_html=True)
 
-        
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
         b1, b2 = st.columns(2)
         if b1.button("Graph →", key="ov_to_graph", use_container_width=True):

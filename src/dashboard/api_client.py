@@ -10,12 +10,13 @@ import yaml
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_CONFIG_PATH = _PROJECT_ROOT / "configs" / "default.yaml"
-_CONFIG = yaml.safe_load(_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+_CONFIG_PATH  = _PROJECT_ROOT / "configs" / "default.yaml"
+_CONFIG       = yaml.safe_load(_CONFIG_PATH.read_text(encoding="utf-8")) or {}
 _DASHBOARD_CFG = _CONFIG.get("dashboard", {})
 
-BASE_URL: str = _DASHBOARD_CFG.get("api_base_url", "http://localhost:8000").rstrip("/")
+BASE_URL: str  = _DASHBOARD_CFG.get("api_base_url", "http://localhost:8000").rstrip("/")
 TIMEOUT: float = 10.0
+
 
 def _get(path: str, params: dict[str, Any] | None = None) -> Any:
     url = f"{BASE_URL}{path}"
@@ -37,7 +38,7 @@ def _get(path: str, params: dict[str, Any] | None = None) -> Any:
     except Exception as exc:
         logger.error("Unexpected error calling %s: %s", url, exc)
         raise
-    
+
 
 def _post(path: str) -> Any:
     url = f"{BASE_URL}{path}"
@@ -52,13 +53,21 @@ def _post(path: str) -> Any:
         logger.error("API %s %s — %s", exc.response.status_code, url, exc.response.text)
         raise
 
+
 def check_health() -> dict[str, Any]:
     return _get("/health")
 
-def get_alerts(limit: int = 200, severity: str | None = None) -> list[dict[str, Any]]:
+
+def get_alerts(
+    limit: int = 200,
+    severity: str | None = None,
+    source: str | None = None,   # "live" | "pcap" | None (= all)
+) -> list[dict[str, Any]]:
     params: dict[str, Any] = {"limit": limit}
     if severity and severity != "ALL":
         params["severity"] = severity.upper()
+    if source and source in ("live", "pcap"):
+        params["source"] = source
     return _get("/alerts", params=params)
 
 
@@ -66,8 +75,12 @@ def get_alert(alert_id: str) -> dict[str, Any]:
     return _get(f"/alerts/{alert_id}")
 
 
-def get_alert_stats() -> dict[str, int]:
-    return _get("/alerts/stats")
+def get_alert_stats(source: str | None = None) -> dict[str, int]:
+    """source = 'live' | 'pcap' | None (all)"""
+    params: dict[str, Any] = {}
+    if source in ("live", "pcap"):
+        params["source"] = source
+    return _get("/alerts/stats", params=params)
 
 
 def get_alerts_by_src_ip(src_ip: str) -> list[dict[str, Any]]:
@@ -78,9 +91,11 @@ def suppress_alert(alert_id: str) -> dict[str, Any]:
     return _post(f"/alerts/{alert_id}/suppress")
 
 
-
-def get_flows(limit: int = 200) -> list[dict[str, Any]]:
-    return _get("/flows", params={"limit": limit})
+def get_flows(limit: int = 200, source: str | None = None) -> list[dict[str, Any]]:
+    params: dict[str, Any] = {"limit": limit}
+    if source in ("live", "pcap"):
+        params["source"] = source
+    return _get("/flows", params=params)
 
 
 def get_flow(flow_id: str) -> dict[str, Any]:
