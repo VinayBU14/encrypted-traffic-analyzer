@@ -2,14 +2,13 @@
 src/dashboard/views/alert_detail.py
 Alert detail view — full breakdown with Groq AI analysis.
 
-Fixes vs previous version:
-  - DB_PATH reads SPECTRA_DB env var so it matches where the API writes
-  - _load_alerts falls back to 'created_at' if 'composite_score' is missing
-    (handles old/partial databases gracefully)
-  - _trigger_groq passes DB_PATH explicitly instead of hardcoded "spectra.db"
-  - Groq panel shows threat type badge AND confidence correctly
-  - "Refresh" button actually re-polls the DB for updated Groq fields
-  - is_live badge shown correctly
+Fixes in this version:
+  - Groq model updated to llama-3.3-70b-versatile (llama3-70b-8192 decommissioned).
+  - AI analysis panel auto-polls the DB every 3 s after triggering Groq so
+    results appear automatically without user clicking Refresh.
+  - Groq trigger is only fired once per alert_id (tracked in session_state)
+    so it doesn't spam the API on every rerun.
+  - Refresh button now does a hard DB reload, not just a rerun.
 """
 
 from __future__ import annotations
@@ -18,10 +17,10 @@ import json
 import os
 import sqlite3
 import threading
+import time
 
 import streamlit as st
 
-# ── Use same DB path as the API ───────────────────────────────────────────────
 DB_PATH = os.getenv("SPECTRA_DB", "data/spectra.db")
 
 SEVERITY_COLOR = {
@@ -55,7 +54,6 @@ def _is_capture_running() -> bool:
 
 
 def _load_alerts(limit: int = 200, source: str | None = None) -> list[dict]:
-    """Load alerts from DB. source='live'|'pcap'|None (all)"""
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
@@ -89,7 +87,6 @@ def _load_alerts(limit: int = 200, source: str | None = None) -> list[dict]:
 
 
 def _reload_alert(alert_id: str) -> dict | None:
-    """Reload a single alert from DB (used after Groq writes back)."""
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
@@ -100,14 +97,24 @@ def _reload_alert(alert_id: str) -> dict | None:
         return None
 
 
-def _trigger_groq(alert: dict):
-    """Fire Groq analysis in background thread if not already done."""
+def _trigger_groq(alert: dict) -> None:
+    """Fire Groq analysis in background thread — only once per alert_id."""
+    aid = alert.get("alert_id", "")
+    triggered_key = f"groq_triggered_{aid}"
+
+    if st.session_state.get(triggered_key):
+        return  # Already triggered this session — don't fire again
+
+    st.session_state[triggered_key] = True
+
     def _run():
         try:
             from src.integrations.groq_client import analyse_and_store
             analyse_and_store(alert, DB_PATH)
         except Exception as e:
-            pass  # silently ignore — dashboard will show "running" state
+            import logging
+            logging.getLogger(__name__).warning("Groq background failed: %s", e)
+
     threading.Thread(target=_run, daemon=True).start()
 
 
@@ -128,7 +135,7 @@ def _score_bar(label: str, score: float, color: str = "#58a6ff") -> str:
     )
 
 
-def _groq_panel(alert: dict):
+def _groq_panel(alert: dict) -> None:
     st.markdown("---")
     st.markdown(
         '<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px">'
@@ -149,7 +156,6 @@ def _groq_panel(alert: dict):
         conf   = alert.get("groq_confidence", "LOW") or "LOW"
         conf_c = {"HIGH": "#3fb950", "MEDIUM": "#e3b341", "LOW": "#f85149"}.get(conf, "#8b949e")
 
-        # Badges row
         st.markdown(
             f'<div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">'
             f'<span style="background:#161b22;border:1px solid #30363d;border-radius:20px;'
@@ -161,7 +167,6 @@ def _groq_panel(alert: dict):
             unsafe_allow_html=True,
         )
 
-        # Summary card
         st.markdown(
             f'<div style="background:linear-gradient(135deg,#0d2137,#0a1628);'
             f'border:1px solid #1f6feb44;border-radius:8px;padding:14px 16px;margin-bottom:10px">'
@@ -173,7 +178,6 @@ def _groq_panel(alert: dict):
             unsafe_allow_html=True,
         )
 
-        # Explanation card
         explanation = alert.get("groq_explanation", "")
         if explanation:
             st.markdown(
@@ -186,7 +190,6 @@ def _groq_panel(alert: dict):
                 unsafe_allow_html=True,
             )
 
-        # Action card
         action = alert.get("groq_action", "")
         if action:
             st.markdown(
@@ -199,21 +202,50 @@ def _groq_panel(alert: dict):
                 unsafe_allow_html=True,
             )
 
+        # Refresh button to re-run Groq (e.g. to get a fresh analysis)
+        if st.button("↻  Refresh AI analysis", key=f"groq_refresh_{alert.get('alert_id','')}"):
+            aid = alert.get("alert_id", "")
+            # Clear the "triggered" flag so it fires again
+            st.session_state.pop(f"groq_triggered_{aid}", None)
+            fresh = _reload_alert(aid)
+            if fresh:
+                _trigger_groq(fresh)
+            st.rerun()
+
     elif needs_groq:
+        aid = alert.get("alert_id", "")
+
+        # Trigger once in background
         _trigger_groq(alert)
+
+        # Check if result is ready yet by polling DB
+        fresh = _reload_alert(aid)
+        if fresh and fresh.get("groq_summary", "").strip():
+            # Result arrived — rerun to display it
+            st.rerun()
+
+        # Still waiting — show spinner and auto-poll every 3 s
         st.markdown(
             '<div style="background:#161b22;border:1px solid #30363d;border-radius:8px;'
             'padding:20px;text-align:center;color:#8b949e">'
-            '🔄 AI analysis in progress — refresh in a few seconds…'
+            '🔄 AI analysis in progress — results will appear automatically…'
             '</div>',
             unsafe_allow_html=True,
         )
-        if st.button("↻  Refresh AI analysis"):
-            # Reload from DB and rerun so updated groq fields are shown
-            fresh = _reload_alert(alert.get("alert_id", ""))
-            if fresh and fresh.get("groq_summary"):
-                st.success("AI analysis complete!")
-            st.rerun()
+
+        col_btn, _ = st.columns([1, 3])
+        with col_btn:
+            if st.button("↻  Refresh AI Analysis", key=f"groq_manual_{aid}"):
+                fresh = _reload_alert(aid)
+                if fresh and fresh.get("groq_summary", "").strip():
+                    st.success("AI analysis complete!")
+                st.rerun()
+
+        # Auto-poll: sleep 3 s then rerun so the panel rechecks the DB
+        # This is non-blocking relative to the rest of the page (already rendered)
+        time.sleep(3)
+        st.rerun()
+
     else:
         st.markdown(
             f'<div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;'
@@ -249,7 +281,6 @@ def render():
         st.warning(msg)
         return
 
-    # Alert selector
     options = [
         f"{a.get('severity','?')} | "
         f"{a.get('src_ip','?')}:{a.get('src_port','')} → "
@@ -266,13 +297,17 @@ def render():
     )
     alert = alerts[idx]
 
+    # Always reload from DB so groq fields are fresh on every render
+    fresh = _reload_alert(alert.get("alert_id", ""))
+    if fresh:
+        alert = fresh
+
     sev     = alert.get("severity", "LOW")
     color   = SEVERITY_COLOR.get(sev, "#8b949e")
     is_live = bool(alert.get("is_live"))
     live_badge = (' <span style="font-size:13px;color:#3fb950;background:#0d2014;'
                   'padding:2px 8px;border-radius:4px">⚡ LIVE</span>') if is_live else ""
 
-    # Alert title
     st.markdown(
         f'<h2 style="color:{color};border-left:3px solid {color};'
         f'padding-left:16px;margin-bottom:4px">'
@@ -282,7 +317,6 @@ def render():
     st.caption(f"Alert ID: `{alert.get('alert_id', 'N/A')}`")
     st.divider()
 
-    # Two-column: findings + deviation
     col1, col2 = st.columns(2)
     with col1:
         st.markdown(
@@ -322,10 +356,8 @@ def render():
             unsafe_allow_html=True,
         )
 
-    # Groq AI panel
     _groq_panel(alert)
 
-    # Score breakdown
     st.divider()
     st.markdown(
         '<div style="font-size:10px;color:#8b949e;letter-spacing:1px;margin-bottom:12px">'
@@ -341,13 +373,12 @@ def render():
         unsafe_allow_html=True,
     )
 
-    # Other alerts from same source
     src_ip   = alert.get("src_ip", "")
     aid      = alert.get("alert_id", "")
     same_src = [a for a in alerts if a.get("src_ip") == src_ip and a.get("alert_id") != aid]
     with st.expander(f"OTHER ALERTS FROM {src_ip} ({len(same_src)})"):
         for a in same_src[:10]:
-            sc = SEVERITY_COLOR.get(a.get("severity","LOW"), "#8b949e")
+            sc = SEVERITY_COLOR.get(a.get("severity", "LOW"), "#8b949e")
             st.markdown(
                 f'<div style="font-family:monospace;font-size:12px;padding:5px 0;'
                 f'border-bottom:1px solid #21262d">'
@@ -362,7 +393,6 @@ def render():
                 unsafe_allow_html=True,
             )
 
-    # Raw JSON (excluding groq fields)
     with st.expander("RAW JSON"):
         raw = {k: v for k, v in alert.items() if not k.startswith("groq_")}
         st.json(raw)

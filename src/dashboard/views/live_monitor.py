@@ -96,7 +96,6 @@ def render() -> None:
     with c1:
         capture_running = _is_capture_running()
         source_opts = ["All", "Live Only", "PCAP Only"]
-        # Force "Live Only" every render while capture is active
         if capture_running:
             st.session_state["lm_source"] = "Live Only"
         elif "lm_source" not in st.session_state:
@@ -159,112 +158,130 @@ def render() -> None:
             <div style="font-family:'Syne',sans-serif;color:#334155;font-weight:600">
                 No alerts for selected filter</div>
         </div>""", unsafe_allow_html=True)
-        return
+        # Still schedule auto-refresh below — don't return early
+    else:
+        df = _build_dataframe(alerts)
+        if not show_suppressed:
+            df = df[~df["is_suppressed"]]
 
-    df = _build_dataframe(alerts)
-    if not show_suppressed:
-        df = df[~df["is_suppressed"]]
-
-    if df.empty:
-        st.info("All alerts are suppressed. Enable 'Suppressed' to view them.")
-        return
-
-    st.markdown(f"""
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-        <div style="font-family:'Syne',sans-serif;font-size:0.72rem;font-weight:700;
-                    color:#334155;text-transform:uppercase;letter-spacing:0.1em">
-            {len(df)} alert(s)
-        </div>
-    </div>""", unsafe_allow_html=True)
-
-    alert_by_id = {a.get("alert_id", ""): a for a in alerts}
-
-    hcols = st.columns([1.1, 1.5, 1.4, 1.8, 2.5, 1.4, 1.0])
-    for col, h in zip(hcols, ["Severity", "Score", "Source IP", "Destination", "Top Signal", "Time", "Actions"]):
-        col.markdown(
-            f"""<div style="font-family:'Syne',sans-serif;font-size:0.68rem;
-            font-weight:700;color:#334155;text-transform:uppercase;
-            letter-spacing:0.08em;padding:6px 0 8px">{h}</div>""",
-            unsafe_allow_html=True,
-        )
-
-    for _, row in df.iterrows():
-        sev   = row["severity"]
-        color = _SEVERITY_COLOR.get(sev, "#64748b")
-        score = float(row["composite_score"])
-        pct   = int(score * 100)
-        aid   = row["alert_id"]
-        raw   = alert_by_id.get(aid, {})
-
-        findings = raw.get("findings") or []
-        if isinstance(findings, str):
-            import json
-            try:   findings = json.loads(findings)
-            except: findings = [findings]
-        if findings:
-            top_signal = str(findings[0])
-            if len(top_signal) > 42:
-                top_signal = f"{top_signal[:42]}…"
+        if df.empty:
+            st.info("All alerts are suppressed. Enable 'Suppressed' to view them.")
         else:
-            top_signal = (f"anomaly={float(raw.get('anomaly_score',0)):.2f} "
-                          f"ja3={float(raw.get('ja3_score',0)):.2f} "
-                          f"bcn={float(raw.get('beacon_score',0)):.2f}")
+            st.markdown(f"""
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+                <div style="font-family:'Syne',sans-serif;font-size:0.72rem;font-weight:700;
+                            color:#334155;text-transform:uppercase;letter-spacing:0.1em">
+                    {len(df)} alert(s)
+                </div>
+            </div>""", unsafe_allow_html=True)
 
-        src_label = row["src_ip"]
-        src_port  = row.get("src_port", "")
-        if src_port:
-            src_label = f"{src_label}:{src_port}"
+            alert_by_id = {a.get("alert_id", ""): a for a in alerts}
 
-        live_badge = ' <span style="font-size:9px;color:#3fb950">⚡</span>' if row.get("is_live") else ""
+            hcols = st.columns([1.1, 1.5, 1.4, 1.8, 2.5, 1.4, 1.0])
+            for col, h in zip(hcols, ["Severity", "Score", "Source IP", "Destination", "Top Signal", "Time", "Actions"]):
+                col.markdown(
+                    f"""<div style="font-family:'Syne',sans-serif;font-size:0.68rem;
+                    font-weight:700;color:#334155;text-transform:uppercase;
+                    letter-spacing:0.08em;padding:6px 0 8px">{h}</div>""",
+                    unsafe_allow_html=True,
+                )
 
-        c1, c2, c3, c4, c5, c6, c7 = st.columns([1.1, 1.5, 1.4, 1.8, 2.5, 1.4, 1.0])
+            for _, row in df.iterrows():
+                sev   = row["severity"]
+                color = _SEVERITY_COLOR.get(sev, "#64748b")
+                score = float(row["composite_score"])
+                pct   = int(score * 100)
+                aid   = row["alert_id"]
+                raw   = alert_by_id.get(aid, {})
 
-        c1.markdown(
-            f'<div style="padding:6px 0"><span class="badge badge-{sev.lower()}">{sev}</span></div>',
-            unsafe_allow_html=True,
-        )
-        c2.markdown(f"""
-        <div style="padding:4px 0">
-            <div style="font-family:'JetBrains Mono',monospace;font-size:0.78rem;
-                        color:{color};font-weight:600">{score:.3f}</div>
-            <div class="score-track">
-                <div class="score-fill" style="width:{pct}%;background:{color}"></div>
-            </div>
-        </div>""", unsafe_allow_html=True)
-        c3.markdown(f'<div class="mono" style="padding:6px 0">{src_label}{live_badge}</div>', unsafe_allow_html=True)
-        c4.markdown(
-            f'<div class="mono" style="padding:6px 0;color:#94a3b8" title="{row["destination"]}">{row["destination"]}</div>',
-            unsafe_allow_html=True,
-        )
-        c5.markdown(
-            f'<div class="mono" style="padding:6px 0;color:#64748b" title="{top_signal}">{top_signal}</div>',
-            unsafe_allow_html=True,
-        )
-        c6.markdown(f'<div class="mono" style="padding:6px 0">{row["timestamp"]}</div>', unsafe_allow_html=True)
+                findings = raw.get("findings") or []
+                if isinstance(findings, str):
+                    import json
+                    try:   findings = json.loads(findings)
+                    except: findings = [findings]
+                if findings:
+                    top_signal = str(findings[0])
+                    if len(top_signal) > 42:
+                        top_signal = f"{top_signal[:42]}…"
+                else:
+                    top_signal = (f"anomaly={float(raw.get('anomaly_score',0)):.2f} "
+                                  f"ja3={float(raw.get('ja3_score',0)):.2f} "
+                                  f"bcn={float(raw.get('beacon_score',0)):.2f}")
 
-        a1, a2 = c7.columns(2)
-        if a1.button("→", key=f"lm_open_{aid}", use_container_width=True):
-            state.set_selected_alert(aid)
-            st.rerun()
-        if a2.button("✕", key=f"lm_sup_{aid}", use_container_width=True):
-            try:
-                api_client.suppress_alert(aid)
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Suppress failed: {exc}")
+                src_label = row["src_ip"]
+                src_port  = row.get("src_port", "")
+                if src_port:
+                    src_label = f"{src_label}:{src_port}"
 
-        st.markdown('<div style="border-bottom:1px solid #0f1923;margin:0 0 2px"></div>', unsafe_allow_html=True)
+                live_badge = ' <span style="font-size:9px;color:#3fb950">⚡</span>' if row.get("is_live") else ""
 
-    # Auto-refresh
+                c1, c2, c3, c4, c5, c6, c7 = st.columns([1.1, 1.5, 1.4, 1.8, 2.5, 1.4, 1.0])
+
+                c1.markdown(
+                    f'<div style="padding:6px 0"><span class="badge badge-{sev.lower()}">{sev}</span></div>',
+                    unsafe_allow_html=True,
+                )
+                c2.markdown(f"""
+                <div style="padding:4px 0">
+                    <div style="font-family:'JetBrains Mono',monospace;font-size:0.78rem;
+                                color:{color};font-weight:600">{score:.3f}</div>
+                    <div class="score-track">
+                        <div class="score-fill" style="width:{pct}%;background:{color}"></div>
+                    </div>
+                </div>""", unsafe_allow_html=True)
+                c3.markdown(f'<div class="mono" style="padding:6px 0">{src_label}{live_badge}</div>', unsafe_allow_html=True)
+                c4.markdown(
+                    f'<div class="mono" style="padding:6px 0;color:#94a3b8" title="{row["destination"]}">{row["destination"]}</div>',
+                    unsafe_allow_html=True,
+                )
+                c5.markdown(
+                    f'<div class="mono" style="padding:6px 0;color:#64748b" title="{top_signal}">{top_signal}</div>',
+                    unsafe_allow_html=True,
+                )
+                c6.markdown(f'<div class="mono" style="padding:6px 0">{row["timestamp"]}</div>', unsafe_allow_html=True)
+
+                a1, a2 = c7.columns(2)
+                if a1.button("→", key=f"lm_open_{aid}", use_container_width=True):
+                    state.set_selected_alert(aid)
+                    st.rerun()
+                if a2.button("✕", key=f"lm_sup_{aid}", use_container_width=True):
+                    try:
+                        api_client.suppress_alert(aid)
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Suppress failed: {exc}")
+
+                st.markdown('<div style="border-bottom:1px solid #0f1923;margin:0 0 2px"></div>', unsafe_allow_html=True)
+
+    # ── Auto-refresh — NON-BLOCKING ───────────────────────────────────────────
+    # Uses a timestamp stored in session_state so the countdown happens via
+    # fast reruns rather than time.sleep() which blocks the entire page.
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+
     if refresh_interval > 0:
-        ph = st.empty()
-        for remaining in range(refresh_interval, 0, -1):
-            ph.markdown(f'<div class="mono" style="color:#1e2a3a;font-size:0.75rem">'
-                        f'↻ refreshing in {remaining}s</div>', unsafe_allow_html=True)
+        now = time.time()
+        last_refresh = st.session_state.get("lm_last_refresh", now)
+
+        # Initialise on first render
+        if "lm_last_refresh" not in st.session_state:
+            st.session_state["lm_last_refresh"] = now
+
+        elapsed  = now - st.session_state["lm_last_refresh"]
+        remaining = max(0, int(refresh_interval - elapsed))
+
+        st.markdown(
+            f'<div class="mono" style="color:#1e2a3a;font-size:0.75rem">'
+            f'↻ refreshing in {remaining}s</div>',
+            unsafe_allow_html=True,
+        )
+
+        if elapsed >= refresh_interval:
+            st.session_state["lm_last_refresh"] = now
+            st.rerun()
+        else:
+            # Sleep only 1 second then rerun to tick the countdown — non-blocking
             time.sleep(1)
-        ph.empty()
-        st.rerun()
+            st.rerun()
     else:
         if st.button("↻  Refresh now", key="lm_manual"):
             st.rerun()

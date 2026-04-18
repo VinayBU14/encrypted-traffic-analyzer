@@ -2,13 +2,16 @@
 src/dashboard/views/live_capture_view.py
 
 Fixes in this version:
-  - Interface dropdown shows friendly names (Wi-Fi, Ethernet, etc.) not raw NPF GUIDs
-  - Wi-Fi / WLAN interface is auto-selected by default
-  - Sends npf_path (raw path) to the API for Scapy, not the friendly name
-  - BPF filter left empty by default on Windows (Npcap BPF support is limited)
-  - Polls for alerts on every render (running or stopped) so results show after stop
-  - Groq AI explanation shown inline when available
-  - Live vs PCAP badge
+  - After STOP, polls for alerts repeatedly with progress indicator so results
+    appear once the backend finishes scoring flushed flows (was polling once
+    immediately before DB writes completed, showing empty results).
+  - Distinguishes "drain pending" state from truly empty results.
+  - Auto-refreshes on every render while running.
+  - Interface dropdown shows friendly names (Wi-Fi, Ethernet, etc.).
+  - Wi-Fi / WLAN interface is auto-selected by default.
+  - Sends npf_path (raw path) to the API for Scapy, not the friendly name.
+  - Groq AI explanation shown inline when available.
+  - Live vs PCAP badge on each alert.
 """
 
 from __future__ import annotations
@@ -34,7 +37,7 @@ SEVERITY_COLOR = {
 
 def _api(method: str, path: str, **kwargs):
     try:
-        r = requests.request(method, f"{API_BASE}{path}", timeout=5, **kwargs)
+        r = requests.request(method, f"{API_BASE}{path}", timeout=10, **kwargs)
         r.raise_for_status()
         return r.json()
     except requests.exceptions.ConnectionError:
@@ -49,16 +52,18 @@ def _api(method: str, path: str, **kwargs):
 
 def _init_state():
     defaults = {
-        "cap_running":    False,
-        "cap_packets":    0,
-        "cap_tls":        0,
-        "cap_bytes":      0,
-        "cap_flows":      0,
-        "cap_alerts":     [],
-        "cap_last_poll":  0.0,
+        "cap_running":      False,
+        "cap_packets":      0,
+        "cap_tls":          0,
+        "cap_bytes":        0,
+        "cap_flows":        0,
+        "cap_alerts":       [],
+        "cap_last_poll":    0.0,
+        "cap_drain_pending": False,   # True while backend is scoring post-stop flows
+        "cap_stop_time":    0.0,      # Timestamp when stop was clicked
         # Interface map: friendly_name → npf_path
-        "cap_iface_map":  {},
-        "cap_iface_list": [],   # ordered list of friendly names
+        "cap_iface_map":    {},
+        "cap_iface_list":   [],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -77,12 +82,13 @@ def _poll_once():
             st.session_state["cap_bytes"]   = s.get("bytes_seen", 0)
             st.session_state["cap_flows"]   = s.get("active_flows", 0)
             st.session_state["cap_running"] = status.get("running", False)
+            st.session_state["cap_drain_pending"] = status.get("drain_pending", False)
     except Exception:
         pass
 
     try:
         alerts = requests.get(
-            f"{API_BASE}/capture/recent-alerts?limit=50&live_only=1", timeout=3
+            f"{API_BASE}/capture/recent-alerts?limit=50&live_only=1", timeout=5
         ).json()
         if alerts:
             st.session_state["cap_alerts"] = alerts.get("alerts", [])
@@ -110,7 +116,6 @@ def _load_interfaces():
             friendly = item.get("friendly", "")
             npf_path = item.get("npf_path", friendly)
         else:
-            # Fallback if API returns plain strings
             friendly = str(item)
             npf_path = str(item)
 
@@ -124,7 +129,6 @@ def _load_interfaces():
 
 
 def _default_iface_index(iface_list: list[str]) -> int:
-    """Pick Wi-Fi / WLAN as default, then Ethernet, then index 0."""
     for i, name in enumerate(iface_list):
         lower = name.lower()
         if "wi-fi" in lower or "wlan" in lower or "wireless" in lower:
@@ -182,7 +186,6 @@ def render():
             help="Select Wi-Fi or Ethernet — the interface carrying your browser traffic.",
         )
         selected_npf = iface_map.get(selected_friendly, selected_friendly)
-        # Show the raw path in small text so you can verify
         st.caption(f"Path: `{selected_npf}`")
 
     with c2:
@@ -218,7 +221,10 @@ def render():
                 json={"npf_path": selected_npf, "bpf_filter": bpf},
             )
             if resp and resp.get("started"):
-                st.session_state["cap_running"] = True
+                st.session_state["cap_running"]      = True
+                st.session_state["cap_drain_pending"] = False
+                st.session_state["cap_alerts"]        = []
+                st.session_state["cap_stop_time"]     = 0.0
                 st.success(f"Capturing on **{selected_friendly}**")
                 st.rerun()
 
@@ -228,11 +234,15 @@ def render():
             disabled=not st.session_state["cap_running"],
             use_container_width=True,
         ):
+            # The /stop endpoint now blocks until flows are scored (up to 12s)
             resp = _api("POST", "/capture/stop")
             if resp is not None:
-                st.session_state["cap_running"] = False
+                st.session_state["cap_running"]       = False
+                st.session_state["cap_stop_time"]     = time.time()
+                st.session_state["cap_drain_pending"]  = not resp.get("drain_complete", True)
                 flushed = resp.get("flows_flushed", 0)
-                st.success(f"Stopped. {flushed} flow(s) flushed and scored.")
+                st.success(f"Stopped. {flushed} flow(s) flushed — loading analysis…")
+                # Poll immediately after stop to fetch scored alerts
                 _poll_once()
                 st.rerun()
 
@@ -274,17 +284,53 @@ def render():
             '</div>',
             unsafe_allow_html=True,
         )
-    else:
-        if not st.session_state["cap_alerts"]:
+
+    elif st.session_state["cap_drain_pending"]:
+        # Backend is still scoring flushed flows
+        st.markdown(
+            '<div style="background:#1c1a0d;border:1px solid #d29922;border-radius:8px;'
+            'padding:14px 18px">'
+            '<span style="color:#d29922;font-weight:600">⏳ Scoring captured flows…</span>'
+            '<span style="color:#8b949e;font-size:13px;margin-left:8px">'
+            'Analysis will appear below in a moment.</span>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+    # ── Alerts section ────────────────────────────────────────────────────────
+    alerts = st.session_state.get("cap_alerts", [])
+
+    # If stopped but no alerts yet, check if we should keep polling
+    stop_time = st.session_state.get("cap_stop_time", 0.0)
+    seconds_since_stop = time.time() - stop_time if stop_time > 0 else 999
+
+    if not st.session_state["cap_running"] and not alerts and stop_time > 0:
+        if seconds_since_stop < 15:
+            # Keep auto-refreshing for up to 15s after stop to wait for scoring
             st.markdown(
                 '<div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;'
                 'padding:24px;text-align:center;color:#8b949e">'
-                'Select Wi-Fi interface above and click START CAPTURE.</div>',
+                '🔍 Analyzing captured flows — results will appear here shortly…'
+                '</div>',
                 unsafe_allow_html=True,
             )
+        else:
+            st.markdown(
+                '<div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;'
+                'padding:24px;text-align:center;color:#8b949e">'
+                'No anomalous flows detected in this capture session. '
+                'Try browsing more sites or increase capture duration.'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+    elif not st.session_state["cap_running"] and not alerts and stop_time == 0:
+        st.markdown(
+            '<div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;'
+            'padding:24px;text-align:center;color:#8b949e">'
+            'Select Wi-Fi interface above and click START CAPTURE.</div>',
+            unsafe_allow_html=True,
+        )
 
-    # Alerts
-    alerts = st.session_state.get("cap_alerts", [])
     if alerts:
         live_count = sum(1 for a in alerts if a.get("is_live"))
         st.markdown(
@@ -324,6 +370,30 @@ def render():
                     + '</div>'
                 )
 
+            # Score breakdown bar
+            anomaly_score = float(a.get("anomaly_score") or 0)
+            ja3_score     = float(a.get("ja3_score") or 0)
+            beacon_score  = float(a.get("beacon_score") or 0)
+            cert_score    = float(a.get("cert_score") or 0)
+
+            score_bars = ""
+            for label, val, bar_color in [
+                ("Anomaly", anomaly_score, "#f85149"),
+                ("Beacon",  beacon_score,  "#e3b341"),
+                ("JA3",     ja3_score,     "#d29922"),
+                ("Cert",    cert_score,    "#58a6ff"),
+            ]:
+                pct = int(val * 100)
+                score_bars += (
+                    f'<div style="display:flex;align-items:center;gap:6px;margin-top:3px">'
+                    f'<span style="font-size:10px;color:#6e7681;width:46px">{label}</span>'
+                    f'<div style="flex:1;background:#21262d;border-radius:2px;height:5px">'
+                    f'<div style="width:{pct}%;background:{bar_color};height:5px;border-radius:2px"></div>'
+                    f'</div>'
+                    f'<span style="font-size:10px;color:#8b949e;width:30px;text-align:right">{val:.2f}</span>'
+                    f'</div>'
+                )
+
             findings = a.get("findings", "[]")
             if isinstance(findings, str):
                 try:   findings = json.loads(findings)
@@ -332,7 +402,7 @@ def render():
 
             st.markdown(
                 f'<div style="background:#0d1117;border:1px solid #21262d;border-radius:6px;'
-                f'padding:12px 16px;margin-bottom:6px">'
+                f'padding:12px 16px;margin-bottom:8px">'
                 f'<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
                 f'<span style="color:{color};font-weight:700;font-size:12px;'
                 f'min-width:68px;padding:2px 8px;border:1px solid {color}44;border-radius:4px">{sev}</span>'
@@ -343,12 +413,17 @@ def render():
                 f'<span style="margin-left:auto">{badge}</span>'
                 f'</div>'
                 f'<div style="color:#6e7681;font-size:12px;margin-top:4px">{top_finding}</div>'
+                f'<div style="margin-top:6px">{score_bars}</div>'
                 f'{groq_html}'
                 f'</div>',
                 unsafe_allow_html=True,
             )
 
-    # Auto-refresh while running
+    # Auto-refresh while running OR shortly after stop (while drain may be pending)
     if st.session_state["cap_running"]:
+        time.sleep(2)
+        st.rerun()
+    elif stop_time > 0 and seconds_since_stop < 15 and not alerts:
+        # Keep refreshing for up to 15s after stop to catch scoring results
         time.sleep(2)
         st.rerun()
