@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import time
@@ -10,19 +9,10 @@ import streamlit as st
 
 from src.dashboard import api_client, state
 
-_SEVERITY_ORDER = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "CLEAN"]
-_SEVERITY_COLOR = {
-    "CRITICAL": "#ef4444", "HIGH": "#f97316",
-    "MEDIUM": "#eab308", "LOW": "#3b82f6", "CLEAN": "#22c55e",
-}
-_SEVERITY_BG = {
-    "CRITICAL": "#2d0a0a", "HIGH": "#2d1200",
-    "MEDIUM": "#2d2000", "LOW": "#071e38", "CLEAN": "#052010",
-}
-_SEVERITY_BORDER = {
-    "CRITICAL": "#7f1d1d", "HIGH": "#7c2d12",
-    "MEDIUM": "#78350f", "LOW": "#1e3a5f", "CLEAN": "#14532d",
-}
+_SEVERITY_ORDER  = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "CLEAN"]
+_SEVERITY_COLOR  = {"CRITICAL": "#ef4444", "HIGH": "#f97316", "MEDIUM": "#eab308", "LOW": "#3b82f6", "CLEAN": "#22c55e"}
+_SEVERITY_BG     = {"CRITICAL": "#2d0a0a", "HIGH": "#2d1200", "MEDIUM": "#2d2000", "LOW": "#071e38", "CLEAN": "#052010"}
+_SEVERITY_BORDER = {"CRITICAL": "#7f1d1d", "HIGH": "#7c2d12", "MEDIUM": "#78350f", "LOW": "#1e3a5f", "CLEAN": "#14532d"}
 _REFRESH_OPTIONS = {"Off": 0, "5 s": 5, "15 s": 15, "30 s": 30, "60 s": 60}
 
 
@@ -33,14 +23,21 @@ def _fmt_ts(ts: float) -> str:
         return str(ts)
 
 
+def _is_capture_running() -> bool:
+    try:
+        import requests
+        r = requests.get("http://localhost:8000/capture/status", timeout=2)
+        return r.json().get("running", False)
+    except Exception:
+        return False
+
+
 def _render_stats_bar(stats: dict[str, int]) -> None:
     total = sum(stats.values())
-    cols = st.columns(6)
+    cols  = st.columns(6)
     for col, sev in zip(cols, _SEVERITY_ORDER):
         count = stats.get(sev, 0)
-        c = _SEVERITY_COLOR[sev]
-        bg = _SEVERITY_BG[sev]
-        bd = _SEVERITY_BORDER[sev]
+        c, bg, bd = _SEVERITY_COLOR[sev], _SEVERITY_BG[sev], _SEVERITY_BORDER[sev]
         with col:
             st.markdown(f"""
             <div style="background:{bg};border:1px solid {bd};border-radius:10px;
@@ -54,8 +51,7 @@ def _render_stats_bar(stats: dict[str, int]) -> None:
             </div>""", unsafe_allow_html=True)
     with cols[5]:
         st.markdown(f"""
-        <div style="background:#080c14;border:1px solid #1e2a3a;border-radius:10px;
-                    padding:14px 16px;">
+        <div style="background:#080c14;border:1px solid #1e2a3a;border-radius:10px;padding:14px 16px;">
             <div style="font-family:'JetBrains Mono',monospace;font-size:1.8rem;
                         font-weight:600;color:#334155;line-height:1">{total}</div>
             <div style="font-family:'Syne',sans-serif;font-size:0.68rem;font-weight:700;
@@ -67,21 +63,25 @@ def _render_stats_bar(stats: dict[str, int]) -> None:
 def _build_dataframe(alerts: list[dict[str, Any]]) -> pd.DataFrame:
     rows = []
     for a in alerts:
+        dst = a.get("dst_domain", "") or a.get("dst_ip", "") or "—"
+        dst_port = a.get("dst_port", "")
+        destination = f"{dst}:{dst_port}" if dst_port else dst
         rows.append({
             "alert_id":        a.get("alert_id", ""),
             "timestamp":       _fmt_ts(a.get("timestamp", 0)),
             "severity":        a.get("severity", ""),
             "composite_score": round(float(a.get("composite_score", 0)), 4),
             "src_ip":          a.get("src_ip", ""),
-            "dst_ip":          a.get("dst_ip", "") or "",
-            "dst_domain":      a.get("dst_domain", "") or "",
+            "src_port":        a.get("src_port", ""),
+            "destination":     destination,
             "is_suppressed":   bool(a.get("is_suppressed", False)),
+            "is_live":         bool(a.get("is_live", False)),
         })
     return pd.DataFrame(rows)
 
 
 def render() -> None:
-    
+
     st.markdown("""
     <div class="page-header">
         <div class="page-header-icon" style="background:#0d1f35;">🛡️</div>
@@ -91,27 +91,48 @@ def render() -> None:
         </div>
     </div>""", unsafe_allow_html=True)
 
-    
-    c1, c2, c3, c4 = st.columns([2, 2, 2, 1])
+    # Controls row
+    c1, c2, c3, c4, c5 = st.columns([1.5, 2, 2, 2, 1])
     with c1:
-        severity_filter = st.selectbox("Filter severity", ["ALL"] + _SEVERITY_ORDER,
-                                       key="lm_sev")
+        capture_running = _is_capture_running()
+        default_src = "Live Only" if capture_running else "All"
+        source_opts = ["All", "Live Only", "PCAP Only"]
+        source_label = st.selectbox(
+            "Source",
+            source_opts,
+            index=source_opts.index(st.session_state.get("lm_source", default_src)),
+            key="lm_source_sel",
+        )
+        st.session_state["lm_source"] = source_label
+
+    source_param = {"Live Only": "live", "PCAP Only": "pcap"}.get(source_label, None)
+
     with c2:
-        limit = st.slider("Max alerts", 25, 500, 100, 25, key="lm_limit")
+        severity_filter = st.selectbox("Filter severity", ["ALL"] + _SEVERITY_ORDER, key="lm_sev")
     with c3:
-        refresh_label = st.selectbox("Auto-refresh", list(_REFRESH_OPTIONS.keys()),
-                                     index=2, key="lm_refresh")
+        limit = st.slider("Max alerts", 25, 500, 100, 25, key="lm_limit")
     with c4:
+        refresh_label = st.selectbox("Auto-refresh", list(_REFRESH_OPTIONS.keys()), index=2, key="lm_refresh")
+    with c5:
         st.markdown("<br>", unsafe_allow_html=True)
         show_suppressed = st.checkbox("Suppressed", value=False, key="lm_supp")
+
     refresh_interval = _REFRESH_OPTIONS[refresh_label]
 
-    
+    if capture_running and source_label == "Live Only":
+        st.markdown(
+            '<div style="background:#0d2137;border:1px solid #1f6feb33;border-radius:6px;'
+            'padding:6px 12px;font-size:12px;color:#58a6ff;margin-bottom:4px">'
+            '⊙ Live capture active — showing only live-captured alerts</div>',
+            unsafe_allow_html=True,
+        )
+
     try:
-        stats  = api_client.get_alert_stats()
+        stats  = api_client.get_alert_stats(source=source_param)
         alerts = api_client.get_alerts(
             limit=limit,
-            severity=severity_filter if severity_filter != "ALL" else None
+            severity=severity_filter if severity_filter != "ALL" else None,
+            source=source_param,
         )
     except ConnectionError as exc:
         st.error(f"**API Unavailable** — {exc}")
@@ -120,7 +141,6 @@ def render() -> None:
         st.error(f"Fetch failed: {exc}")
         return
 
-    
     st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
     _render_stats_bar(stats)
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
@@ -144,8 +164,7 @@ def render() -> None:
         return
 
     st.markdown(f"""
-    <div style="display:flex;justify-content:space-between;align-items:center;
-                margin-bottom:10px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
         <div style="font-family:'Syne',sans-serif;font-size:0.72rem;font-weight:700;
                     color:#334155;text-transform:uppercase;letter-spacing:0.1em">
             {len(df)} alert(s)
@@ -154,11 +173,8 @@ def render() -> None:
 
     alert_by_id = {a.get("alert_id", ""): a for a in alerts}
 
-    hcols = st.columns([1.1, 1.5, 1.2, 1.6, 2.5, 1.4, 1.0])
-    for col, h in zip(
-        hcols,
-        ["Severity", "Score", "Source IP", "Destination", "Top Signal", "Time", "Actions"],
-    ):
+    hcols = st.columns([1.1, 1.5, 1.4, 1.8, 2.5, 1.4, 1.0])
+    for col, h in zip(hcols, ["Severity", "Score", "Source IP", "Destination", "Top Signal", "Time", "Actions"]):
         col.markdown(
             f"""<div style="font-family:'Syne',sans-serif;font-size:0.68rem;
             font-weight:700;color:#334155;text-transform:uppercase;
@@ -167,40 +183,51 @@ def render() -> None:
         )
 
     for _, row in df.iterrows():
-        sev = row["severity"]
+        sev   = row["severity"]
         color = _SEVERITY_COLOR.get(sev, "#64748b")
         score = float(row["composite_score"])
-        pct = int(score * 100)
-        aid = row["alert_id"]
-        raw = alert_by_id.get(aid, {})
+        pct   = int(score * 100)
+        aid   = row["alert_id"]
+        raw   = alert_by_id.get(aid, {})
+
         findings = raw.get("findings") or []
+        if isinstance(findings, str):
+            import json
+            try:   findings = json.loads(findings)
+            except: findings = [findings]
         if findings:
             top_signal = str(findings[0])
-            if len(top_signal) > 40:
-                top_signal = f"{top_signal[:40]}…"
+            if len(top_signal) > 42:
+                top_signal = f"{top_signal[:42]}…"
         else:
-            top_signal = f"JA3:{float(raw.get('ja3_score', 0.0)):.2f} BCN:{float(raw.get('beacon_score', 0.0)):.2f}"
-        destination = row["dst_domain"] or row["dst_ip"] or "—"
+            top_signal = (f"anomaly={float(raw.get('anomaly_score',0)):.2f} "
+                          f"ja3={float(raw.get('ja3_score',0)):.2f} "
+                          f"bcn={float(raw.get('beacon_score',0)):.2f}")
 
-        c1, c2, c3, c4, c5, c6, c7 = st.columns([1.1, 1.5, 1.2, 1.6, 2.5, 1.4, 1.0])
+        src_label = row["src_ip"]
+        src_port  = row.get("src_port", "")
+        if src_port:
+            src_label = f"{src_label}:{src_port}"
+
+        live_badge = ' <span style="font-size:9px;color:#3fb950">⚡</span>' if row.get("is_live") else ""
+
+        c1, c2, c3, c4, c5, c6, c7 = st.columns([1.1, 1.5, 1.4, 1.8, 2.5, 1.4, 1.0])
+
         c1.markdown(
             f'<div style="padding:6px 0"><span class="badge badge-{sev.lower()}">{sev}</span></div>',
             unsafe_allow_html=True,
         )
-        c2.markdown(
-            f"""
+        c2.markdown(f"""
         <div style="padding:4px 0">
             <div style="font-family:'JetBrains Mono',monospace;font-size:0.78rem;
                         color:{color};font-weight:600">{score:.3f}</div>
             <div class="score-track">
                 <div class="score-fill" style="width:{pct}%;background:{color}"></div>
             </div>
-        </div>""",
-            unsafe_allow_html=True,
-        )
-        c3.markdown(f'<div class="mono" style="padding:6px 0">{row["src_ip"]}</div>', unsafe_allow_html=True)
+        </div>""", unsafe_allow_html=True)
+        c3.markdown(f'<div class="mono" style="padding:6px 0">{src_label}{live_badge}</div>', unsafe_allow_html=True)
         c4.markdown(
-            f'<div class="mono" style="padding:6px 0;color:#94a3b8" title="{destination}">{destination}</div>',
+            f'<div class="mono" style="padding:6px 0;color:#94a3b8" title="{row["destination"]}">{row["destination"]}</div>',
             unsafe_allow_html=True,
         )
         c5.markdown(
@@ -222,7 +249,7 @@ def render() -> None:
 
         st.markdown('<div style="border-bottom:1px solid #0f1923;margin:0 0 2px"></div>', unsafe_allow_html=True)
 
-    # ── Auto-refresh ──
+    # Auto-refresh
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
     if refresh_interval > 0:
         ph = st.empty()
