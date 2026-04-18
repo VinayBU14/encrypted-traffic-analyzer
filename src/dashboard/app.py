@@ -3,6 +3,7 @@ import streamlit as st
 from src.dashboard import state
 from src.dashboard.views import (
     alert_detail,
+    attack_simulator_view,
     graph_view,
     live_capture_view,
     live_monitor,
@@ -169,6 +170,7 @@ PAGES = [
     "Alert Detail",
     "Graph View",
     "Session Timeline",
+    "Attack Simulator",
 ]
 PAGE_ICONS = {
     "Overview": "◉",
@@ -178,6 +180,7 @@ PAGE_ICONS = {
     "Alert Detail": "◈",
     "Graph View": "◎",
     "Session Timeline": "◷",
+    "Attack Simulator": "⚡",
 }
 
 with st.sidebar:
@@ -275,3 +278,4 @@ elif page == "Live Capture":      live_capture_view.render()
 elif page == "Alert Detail":      alert_detail.render()
 elif page == "Graph View":        graph_view.render()
 elif page == "Session Timeline":  session_timeline.render()
+elif page == "Attack Simulator":  attack_simulator_view.render()
