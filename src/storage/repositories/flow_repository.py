@@ -1,4 +1,3 @@
-
 """Repository functions for flows table operations."""
 
 from __future__ import annotations
@@ -13,28 +12,71 @@ logger = logging.getLogger(__name__)
 
 
 def _row_to_flow(row: sqlite3.Row) -> FlowRecord:
-    packet_sizes = json.loads(row["packet_sizes"]) if row["packet_sizes"] else []
-    inter_arrival_ms = json.loads(row["inter_arrival_ms"]) if row["inter_arrival_ms"] else []
-    tcp_flags = json.loads(row["tcp_flags"]) if row["tcp_flags"] else {}
+    """
+    FIX: Safely read all columns using dict access with defaults.
+    Previously used direct column name access which raised KeyError when
+    is_live, composite_score, severity and other new columns were absent.
+    """
+    d = dict(row)
+
+    # Parse JSON list fields safely
+    def _parse_list(val) -> list:
+        if not val:
+            return []
+        if isinstance(val, list):
+            return val
+        try:
+            return json.loads(val)
+        except Exception:
+            return []
+
+    def _parse_dict(val) -> dict:
+        if not val:
+            return {}
+        if isinstance(val, dict):
+            return val
+        try:
+            return json.loads(val)
+        except Exception:
+            return {}
+
     return FlowRecord(
-        flow_id=row["flow_id"],
-        src_ip=row["src_ip"],
-        dst_ip=row["dst_ip"],
-        src_port=row["src_port"],
-        dst_port=row["dst_port"],
-        protocol=row["protocol"],
-        start_time=row["start_time"],
-        packet_count=row["packet_count"],
-        bytes_total=row["bytes_total"],
-        upload_bytes=row["upload_bytes"],
-        download_bytes=row["download_bytes"],
-        packet_sizes=packet_sizes,
-        inter_arrival_ms=inter_arrival_ms,
-        tcp_flags=tcp_flags,
-        created_at=row["created_at"],
-        end_time=row["end_time"],
-        duration_ms=row["duration_ms"],
-        status=row["status"],
+        flow_id=             d.get("flow_id", ""),
+        src_ip=              d.get("src_ip", ""),
+        dst_ip=              d.get("dst_ip", ""),
+        src_port=            int(d.get("src_port") or 0),
+        dst_port=            int(d.get("dst_port") or 0),
+        protocol=            d.get("protocol", "TCP"),
+        start_time=          float(d.get("start_time") or 0),
+        packet_count=        int(d.get("packet_count") or 0),
+        bytes_total=         int(d.get("bytes_total") or 0),
+        upload_bytes=        int(d.get("upload_bytes") or 0),
+        download_bytes=      int(d.get("download_bytes") or 0),
+        packet_sizes=        _parse_list(d.get("packet_sizes")),
+        inter_arrival_ms=    _parse_list(d.get("inter_arrival_ms")),
+        tcp_flags=           _parse_dict(d.get("tcp_flags")),
+        created_at=          float(d.get("created_at") or 0),
+        end_time=            float(d.get("end_time")) if d.get("end_time") is not None else None,
+        duration_ms=         float(d.get("duration_ms")) if d.get("duration_ms") is not None else None,
+        status=              d.get("status", "CLOSED"),
+        composite_score=     float(d.get("composite_score") or 0),
+        anomaly_score=       float(d.get("anomaly_score") or 0),
+        ja3_score=           float(d.get("ja3_score") or 0),
+        beacon_score=        float(d.get("beacon_score") or 0),
+        cert_score=          float(d.get("cert_score") or 0),
+        graph_score=         float(d.get("graph_score") or 0),
+        verdict=             d.get("verdict", "BENIGN"),
+        severity=            d.get("severity", "CLEAN"),
+        source=              d.get("source", "pcap"),
+        is_live=             int(d.get("is_live") or 0),
+        packet_rate_per_sec= float(d.get("packet_rate_per_sec") or 0),
+        byte_rate_per_sec=   float(d.get("byte_rate_per_sec") or 0),
+        avg_packet_size=     float(d.get("avg_packet_size") or 0),
+        syn_count=           int(d.get("syn_count") or 0),
+        rst_count=           int(d.get("rst_count") or 0),
+        fin_count=           int(d.get("fin_count") or 0),
+        ack_count=           int(d.get("ack_count") or 0),
+        psh_count=           int(d.get("psh_count") or 0),
     )
 
 
@@ -42,12 +84,25 @@ def insert_flow(conn: sqlite3.Connection, flow: FlowRecord) -> None:
     """Insert a flow record into the flows table."""
     conn.execute(
         """
-        INSERT INTO flows (
+        INSERT OR IGNORE INTO flows (
             flow_id, src_ip, dst_ip, src_port, dst_port, protocol,
             start_time, end_time, duration_ms, packet_count, bytes_total,
             upload_bytes, download_bytes, packet_sizes, inter_arrival_ms,
-            tcp_flags, status, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            tcp_flags, status, created_at,
+            composite_score, anomaly_score, ja3_score, beacon_score,
+            cert_score, graph_score, verdict, severity, source, is_live,
+            packet_rate_per_sec, byte_rate_per_sec, avg_packet_size,
+            syn_count, rst_count, fin_count, ack_count, psh_count
+        ) VALUES (
+            ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?,
+            ?, ?, ?, ?,
+            ?, ?, ?,
+            ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?,
+            ?, ?, ?,
+            ?, ?, ?, ?, ?
+        )
         """,
         (
             flow.flow_id,
@@ -68,6 +123,24 @@ def insert_flow(conn: sqlite3.Connection, flow: FlowRecord) -> None:
             json.dumps(flow.tcp_flags),
             flow.status,
             flow.created_at,
+            getattr(flow, "composite_score", 0),
+            getattr(flow, "anomaly_score", 0),
+            getattr(flow, "ja3_score", 0),
+            getattr(flow, "beacon_score", 0),
+            getattr(flow, "cert_score", 0),
+            getattr(flow, "graph_score", 0),
+            getattr(flow, "verdict", "BENIGN"),
+            getattr(flow, "severity", "CLEAN"),
+            getattr(flow, "source", "pcap"),
+            getattr(flow, "is_live", 0),
+            getattr(flow, "packet_rate_per_sec", 0),
+            getattr(flow, "byte_rate_per_sec", 0),
+            getattr(flow, "avg_packet_size", 0),
+            getattr(flow, "syn_count", 0),
+            getattr(flow, "rst_count", 0),
+            getattr(flow, "fin_count", 0),
+            getattr(flow, "ack_count", 0),
+            getattr(flow, "psh_count", 0),
         ),
     )
     conn.commit()

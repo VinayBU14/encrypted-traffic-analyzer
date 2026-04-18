@@ -33,7 +33,6 @@ def _threat_level(stats: dict[str,int]) -> tuple[str,str,str]:
     return "CLEAN", "#22c55e", "No active threats"
 
 def _is_capture_running() -> bool:
-    """Check if live capture is active by querying the capture status endpoint."""
     try:
         import requests
         r = requests.get("http://localhost:8000/capture/status", timeout=2)
@@ -49,11 +48,16 @@ def render() -> None:
     col_left, col_right = st.columns([3, 1])
     with col_right:
         source_options = ["All Data", "Live Only", "PCAP Only"]
-        # Force "Live Only" every render while capture is active
         if capture_running:
+            # While running: force Live Only
             st.session_state["ov_source"] = "Live Only"
         elif "ov_source" not in st.session_state:
             st.session_state["ov_source"] = "All Data"
+        elif st.session_state.get("ov_source") == "Live Only" and not capture_running:
+            # FIX: After capture stops, reset to All Data so recently scored
+            # live flows are visible on the overview dashboard immediately.
+            st.session_state["ov_source"] = "All Data"
+
         source_label = st.selectbox(
             "Data source",
             source_options,
@@ -357,3 +361,9 @@ def render() -> None:
         if b2.button("Flows →", key="ov_to_flows", use_container_width=True):
             state.set_active_page("Session Timeline")
             st.rerun()
+
+    # FIX: Auto-refresh overview every 10s while capture is running
+    if capture_running:
+        import time
+        time.sleep(3)
+        st.rerun()

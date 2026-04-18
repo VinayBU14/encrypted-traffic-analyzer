@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS flows (
     byte_rate_per_sec   REAL  DEFAULT 0,
     avg_packet_size     REAL  DEFAULT 0,
 
-    -- TCP
+    -- TCP flags
     tcp_flags         TEXT    DEFAULT '{}',
     syn_count         INTEGER DEFAULT 0,
     ack_count         INTEGER DEFAULT 0,
@@ -76,8 +76,9 @@ CREATE TABLE IF NOT EXISTS flows (
     -- metadata
     status            TEXT    DEFAULT 'CLOSED',
     verdict           TEXT    DEFAULT 'BENIGN',
-
-
+    severity          TEXT    DEFAULT 'CLEAN',
+    source            TEXT    DEFAULT 'pcap',
+    is_live           INTEGER DEFAULT 0,
 
     created_at        REAL    DEFAULT 0
 );
@@ -90,10 +91,11 @@ CREATE TABLE IF NOT EXISTS alerts (
     alert_id            TEXT    PRIMARY KEY,
     flow_id             TEXT    NOT NULL DEFAULT '',
 
-    -- timing (unix timestamp float for easy sorting + ISO string for Supabase)
+    -- timing
     timestamp           REAL    DEFAULT 0,
     created_at          REAL    DEFAULT 0,
 
+    severity            TEXT    DEFAULT 'LOW',
 
     -- scores
     composite_score     REAL    DEFAULT 0,
@@ -116,8 +118,8 @@ CREATE TABLE IF NOT EXISTS alerts (
 
     -- flags
     is_suppressed       INTEGER DEFAULT 0,
-
-    is_beacon           INTEGER DEFAULT 0,   -- 1 = beacon alert (always new row)
+    is_live             INTEGER DEFAULT 0,
+    is_beacon           INTEGER DEFAULT 0,
 
     -- Groq AI analysis (populated asynchronously)
     groq_summary        TEXT    DEFAULT '',
@@ -164,16 +166,16 @@ CREATE TABLE IF NOT EXISTS graph_entities (
 -- live_capture_status  (single-row control table)
 -- ────────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS live_capture_status (
-    id           INTEGER PRIMARY KEY CHECK (id = 1),
-    is_running   INTEGER DEFAULT 0,
-    interface    TEXT    DEFAULT '',
-    bpf_filter   TEXT    DEFAULT '',
+    id               INTEGER PRIMARY KEY CHECK (id = 1),
+    is_running       INTEGER DEFAULT 0,
+    interface        TEXT    DEFAULT '',
+    bpf_filter       TEXT    DEFAULT '',
     packets_captured INTEGER DEFAULT 0,
     tls_packets      INTEGER DEFAULT 0,
     bytes_seen       INTEGER DEFAULT 0,
     active_flows     INTEGER DEFAULT 0,
-    started_at   REAL    DEFAULT 0,
-    updated_at   REAL    DEFAULT 0
+    started_at       REAL    DEFAULT 0,
+    updated_at       REAL    DEFAULT 0
 );
 INSERT OR IGNORE INTO live_capture_status (id) VALUES (1);
 
@@ -182,48 +184,59 @@ INSERT OR IGNORE INTO live_capture_status (id) VALUES (1);
 -- ────────────────────────────────────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_flows_src_ip      ON flows  (src_ip);
 CREATE INDEX IF NOT EXISTS idx_flows_dst_ip      ON flows  (dst_ip);
-
-
+CREATE INDEX IF NOT EXISTS idx_flows_is_live     ON flows  (is_live);
 CREATE INDEX IF NOT EXISTS idx_flows_created     ON flows  (created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_alerts_timestamp  ON alerts (timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_alerts_flow       ON alerts (flow_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_src_ip     ON alerts (src_ip);
-
+CREATE INDEX IF NOT EXISTS idx_alerts_is_live    ON alerts (is_live);
+CREATE INDEX IF NOT EXISTS idx_alerts_severity   ON alerts (severity);
 """
 
 # Columns to ADD if they're missing (for existing databases — migration)
 MIGRATION_COLUMNS = [
-    # table,         column,             type,      default
-    ("flows",   "composite_score",   "REAL",    "0"),
-    ("flows",   "anomaly_score",     "REAL",    "0"),
-    ("flows",   "ja3_score",         "REAL",    "0"),
-    ("flows",   "beacon_score",      "REAL",    "0"),
-    ("flows",   "cert_score",        "REAL",    "0"),
-    ("flows",   "graph_score",       "REAL",    "0"),
+    # table,    column,               type,       default
+    # flows — scoring fields
+    ("flows",   "composite_score",    "REAL",     "0"),
+    ("flows",   "anomaly_score",      "REAL",     "0"),
+    ("flows",   "ja3_score",          "REAL",     "0"),
+    ("flows",   "beacon_score",       "REAL",     "0"),
+    ("flows",   "cert_score",         "REAL",     "0"),
+    ("flows",   "graph_score",        "REAL",     "0"),
+    ("flows",   "verdict",            "TEXT",     "'BENIGN'"),
+    ("flows",   "severity",           "TEXT",     "'CLEAN'"),
+    ("flows",   "source",             "TEXT",     "'pcap'"),
+    ("flows",   "is_live",            "INTEGER",  "0"),
+    # flows — rate/size fields
+    ("flows",   "packet_rate_per_sec","REAL",     "0"),
+    ("flows",   "byte_rate_per_sec",  "REAL",     "0"),
+    ("flows",   "avg_packet_size",    "REAL",     "0"),
+    # flows — TLS fields
+    ("flows",   "is_tls",             "INTEGER",  "0"),
+    ("flows",   "tls_version",        "TEXT",     "''"),
+    ("flows",   "cipher",             "TEXT",     "''"),
+    ("flows",   "ja3",                "TEXT",     "''"),
+    # flows — TCP flag counts
+    ("flows",   "syn_count",          "INTEGER",  "0"),
+    ("flows",   "ack_count",          "INTEGER",  "0"),
+    ("flows",   "fin_count",          "INTEGER",  "0"),
+    ("flows",   "rst_count",          "INTEGER",  "0"),
+    ("flows",   "psh_count",          "INTEGER",  "0"),
 
-
-    ("flows",   "verdict",           "TEXT",    "'BENIGN'"),
-    ("flows",   "packet_rate_per_sec","REAL",   "0"),
-    ("flows",   "byte_rate_per_sec", "REAL",    "0"),
-    ("flows",   "avg_packet_size",   "REAL",    "0"),
-    ("flows",   "is_tls",            "INTEGER", "0"),
-    ("flows",   "tls_version",       "TEXT",    "''"),
-    ("flows",   "cipher",            "TEXT",    "''"),
-    ("flows",   "ja3",               "TEXT",    "''"),
-    ("flows",   "syn_count",         "INTEGER", "0"),
-    ("flows",   "ack_count",         "INTEGER", "0"),
-    ("flows",   "fin_count",         "INTEGER", "0"),
-    ("flows",   "rst_count",         "INTEGER", "0"),
-    ("flows",   "psh_count",         "INTEGER", "0"),
-
-    ("alerts",  "is_beacon",         "INTEGER", "0"),
-    ("alerts",  "src_port",          "INTEGER", "0"),
-    ("alerts",  "groq_summary",      "TEXT",    "''"),
-    ("alerts",  "groq_explanation",  "TEXT",    "''"),
-    ("alerts",  "groq_action",       "TEXT",    "''"),
-    ("alerts",  "groq_threat_type",  "TEXT",    "''"),
-    ("alerts",  "groq_confidence",   "TEXT",    "''"),
+    # alerts — missing fields that caused 0-values in the dashboard
+    ("alerts",  "created_at",         "REAL",     "0"),
+    ("alerts",  "anomaly_score",       "REAL",     "0"),
+    ("alerts",  "src_port",           "INTEGER",  "0"),
+    ("alerts",  "dst_ip",             "TEXT",     "''"),
+    ("alerts",  "dst_port",           "INTEGER",  "0"),
+    ("alerts",  "is_live",            "INTEGER",  "0"),
+    ("alerts",  "is_beacon",          "INTEGER",  "0"),
+    ("alerts",  "groq_summary",       "TEXT",     "''"),
+    ("alerts",  "groq_explanation",   "TEXT",     "''"),
+    ("alerts",  "groq_action",        "TEXT",     "''"),
+    ("alerts",  "groq_threat_type",   "TEXT",     "''"),
+    ("alerts",  "groq_confidence",    "TEXT",     "''"),
 ]
 
 

@@ -9,21 +9,32 @@ from pydantic import BaseModel, field_validator
 
 
 class FlowResponse(BaseModel):
-    flow_id: str
-    src_ip: str
-    dst_ip: str
-    src_port: int
-    dst_port: int
-    protocol: str
-    start_time: float
-    end_time: float | None = None
-    duration_ms: float | None = None
-    packet_count: int
-    bytes_total: int
-    upload_bytes: int
-    download_bytes: int
-    status: str
-    tcp_flags: dict[str, Any] = {}
+    flow_id:          str
+    src_ip:           str
+    dst_ip:           str
+    src_port:         int
+    dst_port:         int
+    protocol:         str
+    start_time:       float
+    end_time:         float | None = None
+    duration_ms:      float | None = None
+    packet_count:     int = 0
+    bytes_total:      int = 0
+    upload_bytes:     int = 0
+    download_bytes:   int = 0
+    status:           str = "CLOSED"
+    tcp_flags:        dict[str, Any] = {}
+    # FIX: Added fields that the dashboard relies on for filtering + scoring display
+    is_live:          int = 0
+    severity:         str = "CLEAN"
+    composite_score:  float = 0.0
+    anomaly_score:    float = 0.0
+    ja3_score:        float = 0.0
+    beacon_score:     float = 0.0
+    cert_score:       float = 0.0
+    graph_score:      float = 0.0
+    verdict:          str = "BENIGN"
+    source:           str = "pcap"
 
     model_config = {"from_attributes": True}
 
