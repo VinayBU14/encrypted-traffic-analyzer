@@ -93,20 +93,11 @@ def _get_client():
         raise ImportError("supabase not installed. Run: pip install supabase")
 
 
-def mirror_alert(alert: dict) -> Optional[dict]:
-    """
-    Upsert a single alert to Supabase.
-    Only processes HIGH and CRITICAL — silently skips others.
-    """
-    if alert.get("severity") not in MIRROR_SEVERITIES:
-        return None
-    if not is_configured():
-        return None
-
-    payload = {
+def _build_payload(alert: dict) -> dict:
+    """Build the Supabase upsert payload from an alert dict."""
+    return {
         "alert_id":           str(alert.get("alert_id", "")),
         "flow_id":            str(alert.get("flow_id", "")),
-        # 'timestamp' is a float unix timestamp in both SQLite and Supabase schemas
         "timestamp":          alert.get("timestamp") or alert.get("created_at"),
         "severity":           alert.get("severity"),
         "composite_score":    float(alert.get("composite_score", 0)),
@@ -116,7 +107,7 @@ def mirror_alert(alert: dict) -> Optional[dict]:
         "graph_score":        float(alert.get("graph_score", 0)),
         "anomaly_score":      float(alert.get("anomaly_score", 0)),
         "src_ip":             alert.get("src_ip", ""),
-        "src_port":           int(alert.get("src_port", 0)),   # was missing before
+        "src_port":           int(alert.get("src_port", 0)),
         "dst_ip":             alert.get("dst_ip", ""),
         "dst_port":           int(alert.get("dst_port", 0)),
         "dst_domain":         alert.get("dst_domain", ""),
@@ -127,10 +118,42 @@ def mirror_alert(alert: dict) -> Optional[dict]:
         "is_beacon":          int(alert.get("is_beacon", 0)),
     }
 
+
+def mirror_alert_any_severity(alert: dict) -> Optional[dict]:
+    """
+    Upsert any alert to Supabase regardless of severity.
+    This ensures every generated alert_id is recorded.
+    """
+    if not is_configured():
+        return None
+    if not alert.get("alert_id"):
+        return None
     try:
+        payload = _build_payload(alert)
         client = _get_client()
         resp = client.table("alerts").upsert(payload, on_conflict="alert_id").execute()
-        logger.debug("Supabase mirror OK: %s (%s)", alert["alert_id"], alert["severity"])
+        logger.debug("Supabase mirror OK: %s (%s)", alert["alert_id"], alert.get("severity"))
+        return resp.data
+    except Exception as e:
+        logger.warning("Supabase mirror failed for %s: %s", alert.get("alert_id"), e)
+        return None
+
+
+def mirror_alert(alert: dict) -> Optional[dict]:
+    """
+    Upsert a single alert to Supabase.
+    Only processes HIGH and CRITICAL — silently skips others.
+    """
+    if alert.get("severity") not in MIRROR_SEVERITIES:
+        return None
+    if not is_configured():
+        return None
+
+    try:
+        payload = _build_payload(alert)
+        client = _get_client()
+        resp = client.table("alerts").upsert(payload, on_conflict="alert_id").execute()
+        logger.debug("Supabase mirror OK: %s (%s)", alert["alert_id"], alert.get("severity"))
         return resp.data
     except Exception as e:
         logger.warning("Supabase mirror failed for %s: %s", alert.get("alert_id"), e)

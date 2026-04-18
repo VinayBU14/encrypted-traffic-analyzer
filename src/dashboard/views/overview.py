@@ -49,18 +49,21 @@ def render() -> None:
     col_left, col_right = st.columns([3, 1])
     with col_right:
         source_options = ["All Data", "Live Only", "PCAP Only"]
-        # Default to "Live Only" when capture is active
-        default_idx = 1 if capture_running else 0
-        if "ov_source" not in st.session_state:
-            st.session_state["ov_source"] = source_options[default_idx]
+        # Force "Live Only" every render while capture is active
+        if capture_running:
+            st.session_state["ov_source"] = "Live Only"
+        elif "ov_source" not in st.session_state:
+            st.session_state["ov_source"] = "All Data"
         source_label = st.selectbox(
             "Data source",
             source_options,
-            index=source_options.index(st.session_state.get("ov_source", source_options[default_idx])),
+            index=source_options.index(st.session_state["ov_source"]),
             key="ov_source_sel",
             label_visibility="collapsed",
+            disabled=capture_running,
         )
-        st.session_state["ov_source"] = source_label
+        if not capture_running:
+            st.session_state["ov_source"] = source_label
 
     source_param = {"Live Only": "live", "PCAP Only": "pcap"}.get(source_label, None)
 

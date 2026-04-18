@@ -1,5 +1,3 @@
-
-
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -9,6 +7,15 @@ import pandas as pd
 import streamlit as st
 
 from src.dashboard import api_client, state
+
+
+def _is_capture_running() -> bool:
+    try:
+        import requests
+        r = requests.get("http://localhost:8000/capture/status", timeout=2)
+        return r.json().get("running", False)
+    except Exception:
+        return False
 
 _STATUS_COLOR  = {"ACTIVE":"#22c55e","CLOSED":"#475569","TIMEOUT":"#eab308","RST":"#ef4444"}
 _PROTOCOL_COLOR = {"TCP":"#3b82f6","UDP":"#8b5cf6","TLS":"#06b6d4"}
@@ -75,18 +82,34 @@ def render() -> None:
         </div>
     </div>""", unsafe_allow_html=True)
 
-    c1, c2, c3, c4 = st.columns([2, 2, 2, 1])
+    capture_running = _is_capture_running()
+    if capture_running:
+        st.session_state["st_source"] = "Live Only"
+    elif "st_source" not in st.session_state:
+        st.session_state["st_source"] = "All"
+
+    c1, c2, c3, c4, c5 = st.columns([2, 1.5, 2, 2, 1])
     with c1: limit = st.slider("Max flows", 25, 500, 100, 25, key="st_limit")
-    with c2: proto = st.selectbox("Protocol", ["ALL","TCP","UDP","TLS"], key="st_proto")
-    with c3: status = st.selectbox("Status", ["ALL","ACTIVE","CLOSED","TIMEOUT","RST"], key="st_status")
-    with c4:
+    with c2:
+        source_opts = ["All", "Live Only", "PCAP Only"]
+        source_label = st.selectbox(
+            "Source", source_opts,
+            index=source_opts.index(st.session_state["st_source"]),
+            key="st_source_sel", disabled=capture_running,
+        )
+        if not capture_running:
+            st.session_state["st_source"] = source_label
+    with c3: proto = st.selectbox("Protocol", ["ALL","TCP","UDP","TLS"], key="st_proto")
+    with c4: status = st.selectbox("Status", ["ALL","ACTIVE","CLOSED","TIMEOUT","RST"], key="st_status")
+    with c5:
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("↻ Refresh", key="st_ref", use_container_width=True): st.rerun()
+    source_param = {"Live Only": "live", "PCAP Only": "pcap"}.get(st.session_state["st_source"], None)
 
     ip_q = st.text_input("Filter by IP", placeholder="e.g. 192.168.1.1", key="st_ip")
 
     try:
-        flows = api_client.get_flows(limit=limit)
+        flows = api_client.get_flows(limit=limit, source=source_param)
     except ConnectionError as exc:
         st.error(f"API Unavailable — {exc}"); return
     except Exception as exc:
