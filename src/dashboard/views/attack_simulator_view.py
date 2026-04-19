@@ -3,11 +3,9 @@ src/dashboard/views/attack_simulator_view.py
 =============================================
 Simulated Attack Control Panel — Spectra dashboard view.
 
-Bugs fixed vs v1:
-  - parents[4] → parents[3]: view lives 3 levels deep, not 4
-  - f-string conditional inside HTML caused Streamlit to render raw tags as
-    escaped text. Fixed by pre-computing all sub-strings before the template.
-  - Findings loop variable `f` shadowed the built-in; renamed to `finding`.
+Fix: After injection, the highest-severity alert's ID is stored in session
+state so Alert Detail automatically pre-selects it when you navigate there.
+A "→ View in Alert Detail" button navigates directly.
 """
 
 from __future__ import annotations
@@ -19,6 +17,8 @@ from pathlib import Path
 
 import streamlit as st
 
+from src.dashboard import state as _state
+
 _ROOT = Path(__file__).resolve().parents[3]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
@@ -29,6 +29,7 @@ _SEV_BG     = {"CRITICAL": "#1a0505", "HIGH": "#1a0a00", "MEDIUM": "#1a1400",
                "LOW": "#030f1f", "CLEAN": "#021208"}
 _SEV_BORDER = {"CRITICAL": "#7f1d1d", "HIGH": "#7c2d12", "MEDIUM": "#78350f",
                "LOW": "#1e3a5f", "CLEAN": "#14532d"}
+_SEV_ORDER  = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "CLEAN": 4}
 
 _SCENARIO_META = {
     "ja3": {
@@ -288,12 +289,25 @@ def render() -> None:
                 sim = AttackSimulator(db_path=db_path)
                 alerts = sim.run(scenario_filter=sel, count=count, verbose=False)
                 st.session_state["sim_last_alerts"] = alerts
+
+                # ── KEY FIX: store the best alert ID so Alert Detail pre-selects it ──
+                if alerts:
+                    best = sorted(
+                        alerts,
+                        key=lambda a: (_SEV_ORDER.get(a.get("severity", "LOW"), 99),
+                                       -float(a.get("composite_score", 0))),
+                    )[0]
+                    best_id = best.get("alert_id", "")
+                    if best_id:
+                        st.session_state["sim_jump_alert_id"] = best_id
+
                 sev_counts: dict[str, int] = {}
                 for a in alerts:
                     sev_counts[a["severity"]] = sev_counts.get(a["severity"], 0) + 1
                 summary = "  |  ".join(s + ": " + str(n) for s, n in sev_counts.items())
-                st.success("✅  " + str(len(alerts)) + " alert(s) injected → " + summary +
-                           " — visible in Overview and Alert Detail now.")
+                st.success(
+                    "✅  " + str(len(alerts)) + " alert(s) injected → " + summary
+                )
             except Exception as exc:
                 st.error("Injection failed: " + str(exc))
                 import traceback
@@ -303,6 +317,42 @@ def render() -> None:
     last_alerts = st.session_state.get("sim_last_alerts", [])
     if last_alerts:
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+        # ── Navigation button to jump to Alert Detail ─────────────────────────
+        jump_id = st.session_state.get("sim_jump_alert_id", "")
+        if jump_id:
+            best_alert = next(
+                (a for a in last_alerts if a.get("alert_id") == jump_id), last_alerts[0]
+            )
+            best_sev   = best_alert.get("severity", "")
+            best_score = float(best_alert.get("composite_score", 0))
+            btn_color  = _SEV_COLOR.get(best_sev, "#64748b")
+
+            st.markdown(
+                f'<div style="background:#0d1117;border:1px solid {btn_color}55;'
+                f'border-radius:10px;padding:12px 18px;margin-bottom:16px;'
+                f'display:flex;align-items:center;gap:12px">'
+                f'<span style="font-size:1.2rem">🎯</span>'
+                f'<div>'
+                f'<div style="font-family:\'Syne\',sans-serif;font-size:0.7rem;font-weight:700;'
+                f'color:#334155;text-transform:uppercase;letter-spacing:0.1em">Best injected alert</div>'
+                f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.82rem;'
+                f'color:{btn_color}">{best_sev} — score {best_score:.4f}</div>'
+                f'</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+            if st.button(
+                "→  View this alert in Alert Detail",
+                key="sim_goto_detail",
+                use_container_width=True,
+                type="primary",
+            ):
+                # Store in session state — alert_detail.py reads this to pre-select
+                st.session_state["ad_jump_alert_id"] = jump_id
+                _state.set_active_page("Alert Detail")
+                st.rerun()
+
         st.markdown(
             '<div style="font-family:\'Syne\',sans-serif;font-size:0.65rem;font-weight:700;'
             'color:#334155;text-transform:uppercase;letter-spacing:0.12em;margin-bottom:14px">'
@@ -314,6 +364,8 @@ def render() -> None:
 
         if st.button("Clear results", key="sim_clear"):
             st.session_state.pop("sim_last_alerts", None)
+            st.session_state.pop("sim_jump_alert_id", None)
+            st.session_state.pop("ad_jump_alert_id", None)
             st.rerun()
 
     with st.expander("How the simulation works — pipeline details"):
